@@ -124,6 +124,13 @@ table.tbl tr:hover td{background:#fafbfc}
 .seat-cell:hover{background:#ffe4c7}
 .seat-cell.selected{outline:2px solid var(--brand);background:#ffd9b3}
 .seat-cell.empty-seat{background:#fafafa;border:1px dashed #d7dde5;color:#c3cbd6;font-weight:400}
+/* 座次表提示与异常高亮 */
+.alert{margin:8px 0;padding:8px 12px;border-radius:9px;font-size:13px;line-height:1.5}
+.alert.warn{background:#fef3c7;color:#92400e;border:1px solid #fcd34d}
+.alert.ok{background:#ecfdf5;color:#065f46;border:1px solid #6ee7b7}
+.alert.dup{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+.seat-cell.dup{background:#fee2e2;border-color:#fca5a5;color:#991b1b}
+.dup-tag{display:inline-block;margin-left:6px;font-size:10px;background:#dc2626;color:#fff;border-radius:6px;padding:0 5px;vertical-align:middle}
 .aisle{width:16px;flex-shrink:0}
 .seating-footer{display:flex;border:1px solid var(--line);border-radius:8px;margin-top:10px;overflow:hidden;font-size:12.5px;color:var(--muted)}
 .seating-footer div{flex:1;text-align:center;padding:6px;background:#fafbfc}
