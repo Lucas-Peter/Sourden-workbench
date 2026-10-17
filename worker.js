@@ -110,6 +110,9 @@ async function patchStudent(env, id, b) {
   return true;
 }
 async function deleteStudent(env, id) {
+  const stu = await first(env, 'SELECT name FROM students WHERE id=?', id);
+  if (!stu) return false;
+  const name = stu.name;
   await run(env, 'DELETE FROM todo_checks WHERE student_id=?', id);
   await run(env, 'DELETE FROM dorm_checks WHERE student_id=?', id);
   await run(env, 'DELETE FROM dining_optout WHERE student_id=?', id);
@@ -117,6 +120,16 @@ async function deleteStudent(env, id) {
   await run(env, 'DELETE FROM leaves WHERE student_id=?', id);
   await run(env, 'DELETE FROM violations WHERE student_id=?', id);
   const r = await run(env, 'DELETE FROM students WHERE id=?', id);
+  // 座次表按学号存储：删除该生后同步清掉对应座位
+  const seat = await first(env, 'SELECT data FROM seating WHERE id=1');
+  if (seat && seat.data) {
+    try {
+      const d = JSON.parse(seat.data);
+      let changed = false;
+      if (Array.isArray(d.rows)) for (const row of d.rows) for (let c = 0; c < row.length; c++) if (String(row[c]) === String(id)) { row[c] = null; changed = true; }
+      if (changed) await run(env, 'UPDATE seating SET data=? WHERE id=1', JSON.stringify(d));
+    } catch (e) {}
+  }
   return r.meta.changes > 0;
 }
 
