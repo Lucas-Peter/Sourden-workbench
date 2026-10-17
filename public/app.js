@@ -308,6 +308,8 @@ function pgRoster(){
   if (rosterFilter==='male') list = list.filter(s=>s.gender==='男');
   if (rosterFilter==='female') list = list.filter(s=>s.gender==='女');
   if (rosterFilter==='notes') list = list.filter(s=>s.notes);
+  // 排序：男在前、女在后；同性别按姓名拼音升序（不再按插入序号）
+  list.sort((a,b)=> (a.gender===b.gender ? 0 : (a.gender==='男' ? -1 : 1)) || a.name.localeCompare(b.name, 'zh-Hans-CN'));
   const leaveSet = leaveIdsOn(today());
   const row = (s,i) => `<tr>
     <td>${i}</td>
@@ -321,7 +323,7 @@ function pgRoster(){
       <button class="btn link" onclick="studentModal(${s.id})">编辑</button>
       <button class="btn link red" onclick="studentDel(${s.id})">删除</button></td></tr>`;
   $('#main').innerHTML = `
-    <div class="page-head"><div class="page-title">🎒 学生花名册<small>共 ${S.students.length} 人 · 按性别排列</small></div>
+    <div class="page-head"><div class="page-title">🎒 学生花名册<small>共 ${S.students.length} 人 · 男前女后 · 拼音序</small></div>
       <div class="head-actions">
         <button class="btn" onclick="leaveModal(true)">📋 请假登记</button>
         <button class="btn primary" onclick="studentModal()">＋ 新增学生</button>
