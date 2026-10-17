@@ -126,7 +126,8 @@ async function deleteStudent(env, id) {
     try {
       const d = JSON.parse(seat.data);
       let changed = false;
-      if (Array.isArray(d.rows)) for (const row of d.rows) for (let c = 0; c < row.length; c++) if (String(row[c]) === String(id)) { row[c] = null; changed = true; }
+      // 兜底：学号匹配（新数据）或姓名匹配（旧数据残留）都清掉
+      if (Array.isArray(d.rows)) for (const row of d.rows) for (let c = 0; c < row.length; c++) if (String(row[c]) === String(id) || row[c] === name) { row[c] = null; changed = true; }
       if (changed) await run(env, 'UPDATE seating SET data=? WHERE id=1', JSON.stringify(d));
     } catch (e) {}
   }
