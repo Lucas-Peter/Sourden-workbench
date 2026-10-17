@@ -631,12 +631,14 @@ function pgSeating(){
   const colMap = []; let gi = 0;
   for (let g=0; g<layout.length; g++){ for(let i=0;i<layout[g];i++) colMap.push({seat:true,g}); if(g<layout.length-1) colMap.push({seat:false}); }
   const perRow = layout.reduce((a,b)=>a+b,0);
-  const used = rows.flat().filter(Boolean).length;
+  // 孤儿值防御：格子里残留的学号/旧姓名反查不到学生（如已删学生）→ 一律视为空位
+  const cellStu = rows.map(row => (row||[]).map(v => v ? stuById(v) : null));
+  const used = cellStu.flat().filter(Boolean).length;
   // 规则2：全员必须有座 —— 统计未安排、重复占座、座位容量
   const allIds = stuSorted().map(s=>s.id);
-  const placed = new Set(rows.flat().filter(Boolean).map(Number));
+  const placed = new Set(cellStu.flat().filter(Boolean).map(s=>s.id));
   const missing = allIds.filter(id => !placed.has(id));
-  const counts = {}; rows.flat().forEach(v => { if (v) counts[v] = (counts[v]||0)+1; });
+  const counts = {}; cellStu.flat().forEach(s => { if (s) counts[s.id] = (counts[s.id]||0)+1; });
   const dups = Object.keys(counts).filter(k => counts[k] > 1).map(Number);
   const dupSet = new Set(dups);
   const totalSeats = rows.length ? rows.length * perRow : 0;
@@ -662,8 +664,8 @@ function pgSeating(){
         const ri2 = ri;
         return `<div class="seat-row"><span class="row-label">第${ri2+1}排</span>
           ${colMap.map((cm,ci)=> cm.seat
-            ? `<div class="seat-cell ${rows[ri2][ci]?'':'empty-seat'} ${seatSel.r===ri2&&seatSel.c===ci?'selected':''} ${dupSet.has(Number(rows[ri2][ci]))?'dup':''}"
-                 onclick="seatClick(${ri2},${ci})">${rows[ri2][ci]?esc(stuName(rows[ri2][ci])||'已删除')+(dupSet.has(Number(rows[ri2][ci]))?'<span class="dup-tag">重复</span>':''):'空'}</div>`
+            ? `<div class="seat-cell ${cellStu[ri2][ci]?'':'empty-seat'} ${seatSel.r===ri2&&seatSel.c===ci?'selected':''} ${cellStu[ri2][ci]&&dupSet.has(cellStu[ri2][ci].id)?'dup':''}"
+                 onclick="seatClick(${ri2},${ci})">${cellStu[ri2][ci]?esc(cellStu[ri2][ci].name)+(dupSet.has(cellStu[ri2][ci].id)?'<span class="dup-tag">重复</span>':''):'空'}</div>`
             : `<div class="aisle"></div>`).join('')}
           <span class="row-label" style="text-align:left">${'窗'}</span></div>`;
       }).join('')}
@@ -674,15 +676,15 @@ function seatSnapshot(){ const s=S.seating||{layout:[2,3,2],rows:[]}; return JSO
 // 撤销栈：每次「改动前」压入当前快照 + 操作说明（撤销本身不再压栈）
 function seatPush(label){ seatUndo.push({ snap: seatSnapshot(), label: label||'上次操作' }); if(seatUndo.length>30) seatUndo.shift(); }
 function seatTopLabel(){ return seatUndo.length ? seatUndo[seatUndo.length-1].label : ''; }
-// 纯提交：本地即时生效 + 写库并刷新，不碰撤销栈
-async function seatPut(next){ S.seating = next; render(); await api('/seating','PUT',next); await refresh(); }
+// 纯提交：本地即时生效 + 写库并刷新，不碰撤销栈（保存前自愈：孤儿值清成 null）
+async function seatPut(next){ if (next && Array.isArray(next.rows)) next.rows = next.rows.map(row => (row||[]).map(v => v && stuById(v) ? v : null)); S.seating = next; render(); await api('/seating','PUT',next); await refresh(); }
 async function seatSave(next, label){ seatPush(label); await seatPut(next); }
 function seatClick(r,c){
   const seat = seatSnapshot();
   if (!seat.rows[r]) seat.rows[r] = [];
-  if (seatSel.r<0){ if (seat.rows[r][c]) { seatSel.r=r; seatSel.c=c; } else { seatNameModal(r,c); } }
+  if (seatSel.r<0){ if (seat.rows[r][c] && stuById(seat.rows[r][c])) { seatSel.r=r; seatSel.c=c; } else { seatNameModal(r,c); } }
   else {
-    const a=seat.rows[seatSel.r][seatSel.c], b=seat.rows[r][c];
+    const a=seat.rows[seatSel.r][seatSel.c], b=stuById(seat.rows[r][c]) ? seat.rows[r][c] : null;
     seat.rows[r][c]=a; seat.rows[seatSel.r][seatSel.c]=b;
     const label = (stuName(a)&&stuName(b)) ? `对调 ${stuName(a)}↔${stuName(b)}` : '对调座位';
     seatSel.r=-1; seatSel.c=-1;
@@ -734,13 +736,13 @@ function seatClear(){ if(!confirm('清空全部座位？'))return; const seat=se
 async function seatFillMissing(){
   const seat = seatSnapshot();
   const colMap=[]; for(let g=0;g<seat.layout.length;g++){ for(let i=0;i<seat.layout[g];i++) colMap.push(true); if(g<seat.layout.length-1) colMap.push(false); }
-  const placed = new Set(seat.rows.flat().filter(Boolean).map(Number));
+  const placed = new Set(seat.rows.flat().filter(v => v && stuById(v)).map(Number));
   const rest = stuSorted().filter(s=>!placed.has(s.id)).map(s=>s.id);
   if (!rest.length){ toast('没有缺座的学生'); return; }
   const n = rest.length;
   for (let r=0; r<seat.rows.length && rest.length; r++){
     const row = seat.rows[r]; if(!row) continue;
-    for (let c=0; c<row.length; c++) if (colMap[c] && !row[c] && rest.length) row[c] = rest.shift();
+    for (let c=0; c<row.length; c++) if (colMap[c] && (!row[c] || !stuById(row[c])) && rest.length) row[c] = rest.shift();
   }
   while (rest.length){
     const row = Array(colMap.length).fill(null);
@@ -785,7 +787,7 @@ function seatExportModal(){
   const missing = stuSorted().filter(s => !placed.has(s.id));
   const missingHtml = missing.length ? `<p style="margin:10px 0 0;color:#991b1b">⚠️ 未安排座位（${missing.length} 人）：${missing.map(s=>esc(s.name)).join('、')}</p>` : '';
   const html = `<table border="1" style="border-collapse:collapse"><tr><th>排次</th>${seatCols.map((_,i)=>`<th>第${i+1}列</th>`).join('')}</tr>
-    ${[...seat.rows.keys()].reverse().map(ri=>`<tr><td><b>第${ri+1}排</b></td>${seatCols.map(c=>`<td style="width:70px;text-align:center">${seat.rows[ri][c]?esc(stuName(seat.rows[ri][c])||'已删除'):''}</td>`).join('')}</tr>`).join('')}
+    ${[...seat.rows.keys()].reverse().map(ri=>`<tr><td><b>第${ri+1}排</b></td>${seatCols.map(c=>`<td style="width:70px;text-align:center">${(seat.rows[ri][c]&&stuById(seat.rows[ri][c]))?esc(stuById(seat.rows[ri][c]).name):''}</td>`).join('')}</tr>`).join('')}
     <tr><td colspan="${seatCols.length+1}" style="text-align:center">📢 讲台（前面）</td></tr></table>${missingHtml}`;
   const m = openModal(`${modalHead('📤 导出座次表')}
     <div class="m-body">${missing.length?`<div class="alert warn">⚠️ 还有 <b>${missing.length}</b> 人未安排座位，已列在表格下方。</div>`:''}<div class="hint">下面是当前座次表（第1排在最下方、紧邻讲台）。可下载为表格文件（Excel 可直接打开），或复制后粘贴到 Word。</div>
