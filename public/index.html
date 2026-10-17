@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>26电商综合班 · 班主任工作台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <span class="logo">👩‍🏫 26电商综合班 · 班主任工作台</span>
+  <div class="meta">
+    <span>班主任 <b id="tb-teacher">—</b></span>
+    <span>班级 <b id="tb-count">0</b> 人</span>
+    <span class="storage">☁ 云端存储</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn sm" id="btn-export" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.35);color:#fff">⬇ 导出备份</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="side-title">班级工作台目录</div>
+    <div id="nav"></div>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
