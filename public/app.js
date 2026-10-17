@@ -86,6 +86,8 @@ function dstr(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDa
 const today = () => dstr(new Date());
 const tomorrow = () => dstr(new Date(Date.now()+86400000));
 const stuById = id => S.students.find(x => x.id === Number(id));
+// 花名册统一排序：男在前、女在后，同性别按姓名拼音升序（所有选人处共用）
+const stuSorted = () => [...S.students].sort((a,b)=>(a.gender===b.gender?0:(a.gender==='男'?-1:1))||a.name.localeCompare(b.name,'zh-Hans-CN'));
 const stuName = id => (stuById(id)?.name) || '（已删）';
 
 async function api(path, method='GET', body) {
@@ -221,7 +223,7 @@ function rosterCheckModal(todoId){
   const m = openModal(`${modalHead('👥 逐人核对 · '+esc(t.title))}
     <div class="m-body">
       <div class="hint">点名字切换「已办」，实时统计进度。</div>
-      <div class="person-pills" id="rc-pills">${S.students.map(s=>
+      <div class="person-pills" id="rc-pills">${stuSorted().map(s=>
         `<span class="person-pill ${checked.has(s.id)?'on':''}" data-id="${s.id}">${esc(s.name)}</span>`).join('')}</div>
     </div>
     <div class="m-foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="rc-save">保存</button></div>`, true);
@@ -279,8 +281,8 @@ function leaveModal(batch, id){
   const m = openModal(`${modalHead(batch?'📋 批量登记请假':'📝 '+(id?'编辑请假':'新增请假'))}
     <div class="m-body">
       ${batch?`<div class="field"><label>选择学生（可多选）</label>
-        <div class="person-pills" id="lv-stus">${S.students.map(s=>`<span class="person-pill" data-id="${s.id}">${esc(s.name)}</span>`).join('')}</div></div>`
-      :`<div class="field"><label>学生姓名</label><select id="lv-one">${S.students.map(s=>`<option value="${s.id}" ${cur&&cur.student_id===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>`}
+        <div class="person-pills" id="lv-stus">${stuSorted().map(s=>`<span class="person-pill" data-id="${s.id}">${esc(s.name)}</span>`).join('')}</div></div>`
+      :`<div class="field"><label>学生姓名</label><select id="lv-one">${stuSorted().map(s=>`<option value="${s.id}" ${cur&&cur.student_id===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>`}
       <div class="field"><label>开始日期</label><input id="lv-start" type="date" value="${cur?cur.start_date:today()}"></div>
       <div class="field"><label>结束日期（预计，不填视为请假中）</label><input id="lv-end" type="date" value="${cur&&cur.end_date?cur.end_date:''}"></div>
       <div class="field"><label>请假原因</label><textarea id="lv-reason" placeholder="例：家中有事、就医等">${cur?esc(cur.reason):''}</textarea></div>
@@ -418,7 +420,7 @@ function dormAdjustModal(d){
   const td = today(), leaveSet = leaveIdsOn(td);
   const presentOf = s => { const c = S.dorm_checks.find(c=>c.student_id===s.id&&c.check_date===td); return c?!!c.present:!leaveSet.has(s.id); };
   const mem = S.students.filter(s=>s.dorm===d).sort((a,b)=>(a.bed||'99').localeCompare(b.bed||'99','zh',{numeric:true}));
-  const others = S.students.filter(s=>s.dorm!==d);
+  const others = stuSorted().filter(s=>s.dorm!==d);
   const m = openModal(`${modalHead('⚙ 调整宿舍 · '+d)}
     <div class="m-body">
       <div class="hint">修改床号、设宿舍长、改在校状态，或从下方把学生加入本宿舍。</div>
@@ -521,7 +523,7 @@ function pgDining(){
   const daily = S.dining_daily.find(d=>d.date===date) || {plus:0,minus:0};
   const optout = S.dining_optout.filter(o=>o.date===date).map(o=>o.student_id);
   const final = Math.max(0, S.students.length - leaveSet.size - optout.length + Number(daily.plus||0) - Number(daily.minus||0));
-  const unseated = S.students.filter(s=>!S.seats.some(x=>x.student_id===s.id));
+  const unseated = stuSorted().filter(s=>!S.seats.some(x=>x.student_id===s.id));
   const seatedN = S.seats.length;
   $('#main').innerHTML = `
     <div class="page-head"><div class="page-title">🍚 明日就餐上报<small>明日（${date}）就餐人数</small></div></div>
@@ -539,7 +541,7 @@ function pgDining(){
         <div class="field" style="display:flex;justify-content:space-between"><span>不就餐</span><b style="color:var(--red)">-${optout.length}</b></div>
         <div class="field"><label>不吃名单（自动从就餐人数抵扣）</label>
           <div style="display:flex;gap:6px;margin-bottom:6px">
-            <select id="dn-add" style="flex:1">${S.students.filter(s=>!optout.includes(s.id)).map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+            <select id="dn-add" style="flex:1">${stuSorted().filter(s=>!optout.includes(s.id)).map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
             <button class="btn primary" onclick="diningOptoutAdd()">＋ 加入</button></div>
           <div>${optout.map(id=>`<span class="chip">${esc(stuName(id))} <span class="x" onclick="diningOptoutRemove(${id})">×</span></span>`).join(' ')||'<span class="hint">暂无（在校生全部计入就餐）</span>'}</div></div>
         <div class="grid2">
@@ -563,7 +565,8 @@ function pgDining(){
 }
 function tableCard(t){
   const members = S.seats.filter(x=>x.table_id===t.id).map(x=>x.student_id);
-  const unseated = S.students.filter(s=>!S.seats.some(x=>x.student_id===s.id));
+  const atOther = s => S.seats.some(x=>x.student_id===s.id);
+  const candidates = stuSorted().filter(s=>!members.includes(s.id));
   return `<div class="seat-table-card">
     <div class="s-head"><span class="s-name">${esc(t.label)}</span><span class="pill warn">${members.length} 人</span>
       <span style="margin-left:auto;display:flex;gap:4px">
@@ -571,7 +574,7 @@ function tableCard(t){
         <button class="btn sm danger" onclick="tableDel(${t.id})">🗑</button></span></div>
     <div>${members.map(id=>`<span class="chip">${esc(stuName(id))} <span class="x" onclick="tableRemoveMember(${t.id},${id})">×</span></span>`).join(' ')||'<span class="hint">空桌</span>'}</div>
     <div style="display:flex;gap:6px;margin-top:8px">
-      <select class="tb-add" style="flex:1">${unseated.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+      <select class="tb-add" style="flex:1">${candidates.map(s=>`<option value="${s.id}">${esc(s.name)}${atOther(s)?'（已在别桌，加入）':''}</option>`).join('')}</select>
       <button class="btn sm primary" onclick="tableAddMember(${t.id},this)">＋ 加入</button></div>
   </div>`;
 }
@@ -605,6 +608,12 @@ async function tableRename(id){ const t=S.tables.find(x=>x.id===id); const v=pro
 async function tableDel(id){ if(!confirm('删除该桌位？桌上学生回到未入座。'))return; await api('/tables/'+id,'DELETE'); await refresh(); }
 async function tableAddMember(tid, btn){
   const sel = btn.parentElement.querySelector('.tb-add'); const sid = Number(sel.value); if(!sid) return;
+  // 调桌：先从其它桌移出该生，再加入本桌
+  for (const t of S.tables) {
+    if (t.id === tid) continue;
+    const m = S.seats.filter(x=>x.table_id===t.id).map(x=>x.student_id);
+    if (m.includes(sid)) await api('/tables/'+t.id+'/members','PUT',{members:m.filter(x=>x!==sid)});
+  }
   const members = S.seats.filter(x=>x.table_id===tid).map(x=>x.student_id);
   await api('/tables/'+tid+'/members','PUT',{members:[...members,sid]}); await refresh();
 }
@@ -806,7 +815,7 @@ function pgViolations(){
 function vioModal(){
   const m = openModal(`${modalHead('🚫 新增违规登记')}
     <div class="m-body">
-      <div class="field"><label>学生姓名</label><select id="v-stu">${S.students.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>学生姓名</label><select id="v-stu">${stuSorted().map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
       <div class="field"><label>违规类型</label><select id="v-type">${VIO_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></div>
       <div class="field"><label>日期</label><input id="v-date" type="date" value="${today()}"></div>
       <div class="field"><label>详细情况</label><textarea id="v-details" placeholder="例：上课玩手机被老师发现"></textarea></div>
