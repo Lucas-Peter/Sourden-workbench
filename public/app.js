@@ -648,7 +648,7 @@ function pgSeating(){
         return `<div class="seat-row"><span class="row-label">第${ri2+1}排</span>
           ${colMap.map((cm,ci)=> cm.seat
             ? `<div class="seat-cell ${rows[ri2][ci]?'':'empty-seat'} ${seatSel.r===ri2&&seatSel.c===ci?'selected':''}"
-                 onclick="seatClick(${ri2},${ci})">${rows[ri2][ci]?esc(rows[ri2][ci]):'空'}</div>`
+                 onclick="seatClick(${ri2},${ci})">${rows[ri2][ci]?esc(stuName(rows[ri2][ci])||'已删除'):'空'}</div>`
             : `<div class="aisle"></div>`).join('')}
           <span class="row-label" style="text-align:left">${'窗'}</span></div>`;
       }).join('')}
@@ -673,16 +673,27 @@ function seatClick(r,c){
 }
 function seatNameModal(r,c){
   const cur = (S.seating && S.seating.rows[r] && S.seating.rows[r][c]) || '';
-  const v = prompt('填入学生姓名（留空=清空该座位）', cur); if (v===null) return;
-  const seat = seatSnapshot();
-  seat.rows[r] = seat.rows[r] || [];
-  seat.rows[r][c] = v.trim();
-  seatSave(seat);
+  const opts = stuSorted().map(s=>`<option value="${s.id}" ${String(cur)===String(s.id)?'selected':''}>${esc(s.name)}</option>`).join('');
+  const m = openModal(`${modalHead('👤 安排座位')}
+    <div class="m-body">
+      <div class="field"><label>第${r+1}排 · 第${c+1}列</label><select id="sn-sel" class="tb-add">${opts}</select></div>
+      <div class="hint">选一名学生放入该座位；也可「清空」此座位。</div>
+    </div>
+    <div class="m-foot"><button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn" onclick="seatClearCell(${r},${c})">清空</button>
+      <button class="btn primary" id="sn-ok">确定</button></div>`);
+  m.querySelector('#sn-ok').onclick = () => {
+    const sid = Number(m.querySelector('#sn-sel').value);
+    closeModal();
+    const seat = seatSnapshot(); seat.rows[r] = seat.rows[r] || [];
+    seat.rows[r][c] = sid; seatSave(seat);
+  };
 }
+function seatClearCell(r,c){ const seat=seatSnapshot(); seat.rows[r]=seat.rows[r]||[]; seat.rows[r][c]=null; seatSave(seat); }
 function seatUndoPop(){ if(!seatUndo.length) return toast('没有可撤销的操作'); seatSave(seatUndo.pop()); }
 function seatAuto(){
   const seat = seatSnapshot();
-  const ids = S.students.map(s=>s.name);
+  const ids = stuSorted().map(s=>s.id);
   const perRow = seat.layout.reduce((a,b)=>a+b,0);
   const colTotal = perRow + seat.layout.length-1;
   const nRows = Math.max(1, Math.ceil(ids.length/perRow));
@@ -727,7 +738,7 @@ function seatExportModal(){
   const colMap=[]; for(let g=0;g<seat.layout.length;g++){ for(let i=0;i<seat.layout[g];i++) colMap.push(true); if(g<seat.layout.length-1) colMap.push(false); }
   const seatCols = colMap.map((v,i)=>v?i:-1).filter(i=>i>=0);
   const html = `<table border="1" style="border-collapse:collapse"><tr><th>排次</th>${seatCols.map((_,i)=>`<th>第${i+1}列</th>`).join('')}</tr>
-    ${[...seat.rows.keys()].reverse().map(ri=>`<tr><td><b>第${ri+1}排</b></td>${seatCols.map(c=>`<td style="width:70px;text-align:center">${seat.rows[ri][c]?esc(seat.rows[ri][c]):''}</td>`).join('')}</tr>`).join('')}
+    ${[...seat.rows.keys()].reverse().map(ri=>`<tr><td><b>第${ri+1}排</b></td>${seatCols.map(c=>`<td style="width:70px;text-align:center">${seat.rows[ri][c]?esc(stuName(seat.rows[ri][c])||'已删除'):''}</td>`).join('')}</tr>`).join('')}
     <tr><td colspan="${seatCols.length+1}" style="text-align:center">📢 讲台（前面）</td></tr></table>`;
   const m = openModal(`${modalHead('📤 导出座次表')}
     <div class="m-body"><div class="hint">下面是当前座次表（第1排在最下方、紧邻讲台）。可下载为表格文件（Excel 可直接打开），或复制后粘贴到 Word。</div>

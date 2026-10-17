@@ -112,6 +112,8 @@ table.tbl tr:hover td{background:#fafbfc}
 .seat-table-card{background:#fffdf7;border:1px solid #f5e6c8;border-radius:10px;padding:10px 12px}
 .seat-table-card .s-head{display:flex;align-items:center;gap:6px;margin-bottom:8px}
 .seat-table-card .s-name{font-weight:800;color:#b45309}
+.seat-table-card .chip{font-size:15px;font-weight:700;padding:4px 11px}  /* 已入座姓名放大 */
+.tb-add{font-size:12px}  /* 待加入下拉字号缩小 */
 
 /* 座次表 */
 .seating-wrap{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:16px}
