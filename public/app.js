@@ -157,14 +157,27 @@ const closeModal = () => { $('#modal-root').innerHTML = ''; };
 function modalHead(title){ return `<div class="m-head"><span>${title}</span><button class="m-close">×</button></div>`; }
 
 /* ============ 页面：待办事项 ============ */
+// 排序：未完成在前，已完成压后；组内按 期限(无期限最后)→优先级→时间 排列。
+// done 组按 done_at 升序（刚完成的排最后，符合"标记完成后自动排到后面"的直觉）。
+function todoSort(list){
+  const pri = p => p==='高' ? 0 : p==='中' ? 1 : 2;
+  return [...list].sort((a,b)=>{
+    if (!!a.done !== !!b.done) return (a.done?1:0) - (b.done?1:0);
+    const da = a.due_date || '9999-99-99', db = b.due_date || '9999-99-99';
+    if (da !== db) return da < db ? -1 : 1;
+    if (pri(a.priority) !== pri(b.priority)) return pri(a.priority) - pri(b.priority);
+    return (a.done_at || a.created_at || 0) - (b.done_at || b.created_at || 0);
+  });
+}
 function pgTodos(){
+  const list = todoSort(S.todos);
   const open = S.todos.filter(t=>!t.done).length;
   $('#main').innerHTML = `
     <div class="page-head">
       <div class="page-title">✅ 今日待办<small>未完成 ${open} 项 · 已完成只保留 3 天</small></div>
       <button class="btn primary" onclick="todoModal()">＋ 新增待办</button>
     </div>
-    <div class="todo-grid">${S.todos.map(todoCard).join('') || '<div class="empty">今天没有待办，点右上角新增。</div>'}</div>`;
+    <div class="todo-grid">${list.map(todoCard).join('') || '<div class="empty">今天没有待办，点右上角新增。</div>'}</div>`;
 }
 function todoCard(t){
   const cat = CATS[t.category] || CATS['其他'];
