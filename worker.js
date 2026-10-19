@@ -31,7 +31,8 @@ async function getState(env) {
     all(env, 'SELECT * FROM students ORDER BY gender ASC, name ASC'),
     all(env, 'SELECT * FROM leaves ORDER BY start_date DESC, id DESC'),
     all(env, `SELECT * FROM todos WHERE done=0 OR (done=1 AND done_at >= ?)
-              ORDER BY (due_date IS NULL), due_date ASC,
+              ORDER BY done ASC,
+              (due_date IS NULL), due_date ASC,
               CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END, created_at ASC`,
       Date.now() - 3 * 86400000),
     all(env, 'SELECT * FROM todo_checks'),
