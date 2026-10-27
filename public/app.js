@@ -146,6 +146,7 @@ function leaveCovers(l, d){
   return d <= stop;
 }
 // 已请假天数（含首尾）；未销假的算到今天，不把未来的预计日算进去
+// 注：全量口径，不受「统计起始日」影响；统计弹窗统一走下面的 stat* 版本
 function leaveDays(l){
   const end = leaveEnd(l);
   const stop = (!end || end > today()) ? today() : end;
@@ -160,6 +161,7 @@ function leaveSetOn(d){
 // 统计口径：只取花名册里还在的学生
 const leaveRows = () => S.leaves.filter(l => stuById(l.student_id));
 // 每个学生实际请假的日期集合（多段重叠按天去重）
+// 注：全量口径，不受「统计起始日」影响；统计弹窗用 statDaySets(from)
 function leaveDaySets(){
   const map = new Map();
   for (const l of leaveRows()) {
@@ -328,9 +330,7 @@ function pgLeaves(){
     </div>
     ${stale.length?`<div class="note-strip">往日请假未销假（${stale.length} 人，返校后请销假）</div>
       <div class="card">${stale.map(l=>leaveCard(l,true)).join('')}</div>`:''}
-    <div class="card">
-      ${todays.length?todays.map(l=>leaveCard(l,false)).join(''):'<div class="empty">🙌 今日无人请假，全勤</div>'}
-    </div>`;
+    ${todays.length?`<div class="card">${todays.map(l=>leaveCard(l,false)).join('')}</div>`:''}`;
 }
 function leaveCard(l, stale){
   const s = stuById(l.student_id); if(!s) return '';
@@ -376,10 +376,42 @@ function leaveModal(batch, id){
 
 /* ============ 请假统计（两个维度） ============ */
 let lvStatTab = 'date', lvStatRange = 30;
+// 统计起始日（含当日）：默认只统计 10/18 及之后，更早的记录不计入；null = 统计全部
+const LEAVE_STAT_START = '2026-10-18';
+let lvStatStart = LEAVE_STAT_START;
+
+// 一条请假记录在统计窗口内的有效区间：起点不早于起始日，终点封顶今天；无交集返回 null
+function statSeg(l, from = lvStatStart){
+  const rawEnd = leaveEnd(l);
+  const stop = (!rawEnd || rawEnd > today()) ? today() : rawEnd;
+  const start = (from && from > l.start_date) ? from : l.start_date;
+  if (start > stop) return null;
+  return { start, stop, clipped: start !== l.start_date };
+}
+// 窗口内有交集的请假记录（跨起始日的记录也算，天数只计窗口内部分）
+const statLeaves = (from = lvStatStart) => leaveRows().filter(l => statSeg(l, from));
+function statDays(l, from = lvStatStart){
+  const s = statSeg(l, from);
+  return s ? dayDiff(s.start, s.stop) + 1 : 0;
+}
+// 每个学生在窗口内的请假日期集合（多段重叠按天去重）
+function statDaySets(from = lvStatStart){
+  const map = new Map();
+  for (const l of leaveRows()){
+    const s = statSeg(l, from);
+    if (!s) continue;
+    if (!map.has(l.student_id)) map.set(l.student_id, new Set());
+    const set = map.get(l.student_id);
+    for (let d = s.start; d <= s.stop; d = addDays(d, 1)) set.add(d);
+  }
+  return map;
+}
+const statScopeText = () => lvStatStart ? `${md(lvStatStart)} 起（含当日）` : '全部记录';
+
 function leaveStatsModal(){
-  const rows = leaveRows();
+  const rows = statLeaves();
   const stuN = new Set(rows.map(l => l.student_id)).size;
-  const totalDays = [...leaveDaySets().values()].reduce((n,set) => n + set.size, 0);
+  const totalDays = [...statDaySets().values()].reduce((n,set) => n + set.size, 0);
   const activeN = leaveSetOn(today()).size;
   const overdue = rows.filter(l => l.status==='请假中' && l.end_date && l.end_date < today()).length;
   openModal(`${modalHead('📊 请假统计')}
@@ -391,6 +423,11 @@ function leaveStatsModal(){
         <div class="st warn"><b>${activeN}</b><span>当前请假中</span></div>
       </div>
       ${overdue?`<div class="note-strip">有 ${overdue} 条记录仍在"请假中"但已过预计结束日，请及时销假</div>`:''}
+      <div class="stat-scope">
+        <label class="scope-sw"><input type="checkbox" id="lvst-scope" ${lvStatStart?'checked':''} /> 仅统计起始日之后</label>
+        <input class="scope-date" type="date" id="lvst-start" value="${lvStatStart || LEAVE_STAT_START}" max="${today()}" ${lvStatStart?'':'disabled'} />
+        <span class="scope-note">当前口径：<b>${statScopeText()}</b>，之前的记录不计入</span>
+      </div>
       <div class="tabs">
         <div class="tab ${lvStatTab==='date'?'on':''}" data-tab="date">📅 按日期</div>
         <div class="tab ${lvStatTab==='stu'?'on':''}" data-tab="stu">👤 按学生</div>
@@ -400,6 +437,9 @@ function leaveStatsModal(){
     <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
   const m = $('#modal-root');
   m.querySelectorAll('.tab').forEach(t => t.onclick = () => { lvStatTab = t.dataset.tab; leaveStatsModal(); });
+  const cut = m.querySelector('#lvst-scope'), cutDate = m.querySelector('#lvst-start');
+  cut.onchange = () => { lvStatStart = cut.checked ? (cutDate.value || LEAVE_STAT_START) : null; leaveStatsModal(); };
+  cutDate.onchange = () => { if (!cutDate.value) return; lvStatStart = cutDate.value; leaveStatsModal(); };
   renderLeaveStats();
 }
 function renderLeaveStats(){
@@ -409,17 +449,19 @@ function renderLeaveStats(){
 }
 // 维度一：按日期——每天有多少学生请假
 function leaveStatsByDate(){
-  const rows = leaveRows();
-  if (!rows.length) return '<div class="empty">还没有请假记录</div>';
+  const rows = statLeaves();
+  if (!rows.length) return `<div class="empty">${lvStatStart ? `${md(lvStatStart)} 之后还没有请假记录` : '还没有请假记录'}</div>`;
   const end = today();
   const days = [];
   if (lvStatRange === 0) {
-    let min = rows[0].start_date;
-    for (const l of rows) if (l.start_date < min) min = l.start_date;
+    let min = statSeg(rows[0], lvStatStart).start;
+    for (const l of rows) { const s = statSeg(l, lvStatStart); if (s.start < min) min = s.start; }
     if (dayDiff(min, end) > 366) min = addDays(end, -366);
     for (let d = min; d <= end; d = addDays(d,1)) days.push(d);
   } else {
-    for (let i = lvStatRange - 1; i >= 0; i--) days.push(addDays(end, -i));
+    let from = addDays(end, -(lvStatRange - 1));
+    if (lvStatStart && lvStatStart > from) from = lvStatStart; // 窗口不从起始日之前开始
+    for (let d = from; d <= end; d = addDays(d,1)) days.push(d);
   }
   const list = days.map(d => ({ d, set: leaveSetOn(d) })).reverse(); // 最新在上
   const max = Math.max(1, ...list.map(x => x.set.size));
@@ -427,7 +469,7 @@ function leaveStatsByDate(){
   const rangeBtn = (v, label) => `<span class="tab ${lvStatRange===v?'on':''}" data-range="${v}">${label}</span>`;
   return `
     <div class="tabs sub">${rangeBtn(7,'近 7 天')}${rangeBtn(30,'近 30 天')}${rangeBtn(0,'全部')}</div>
-    <div class="hint">共 ${list.length} 天，其中 ${hit} 天有人请假；人数按学生去重，含已返校但当天仍在假期内的记录。</div>
+    <div class="hint">口径：${statScopeText()}；共 ${list.length} 天，其中 ${hit} 天有人请假；人数按学生去重，含已返校但当天仍在假期内的记录。</div>
     <div class="stat-scroll"><table class="tbl">
       <thead><tr><th style="width:110px">日期</th><th style="width:120px">请假人数</th><th>请假学生</th></tr></thead>
       <tbody>${list.map(({d,set}) => `<tr class="${set.size?'':'dim'}">
@@ -439,29 +481,30 @@ function leaveStatsByDate(){
 }
 // 维度二：按学生——各请了多少天、起止日期
 function leaveStatsByStudent(){
-  const rows = leaveRows();
-  if (!rows.length) return '<div class="empty">还没有请假记录</div>';
+  const rows = statLeaves();
+  if (!rows.length) return `<div class="empty">${lvStatStart ? `${md(lvStatStart)} 之后还没有请假记录` : '还没有请假记录'}</div>`;
   const map = new Map();
   for (const l of rows) {
     const k = l.student_id;
     if (!map.has(k)) map.set(k, { sid:k, list:[] });
     map.get(k).list.push(l);
   }
-  // 按天去重：同一学生多段重叠时，累计天数不重复计
-  const daySets = leaveDaySets();
+  // 按天去重：同一学生多段重叠时，累计天数不重复计（只计起始日之后的部分）
+  const daySets = statDaySets();
   const arr = [...map.values()].map(o => ({ ...o, days: daySets.get(o.sid)?.size || 0 }))
     .sort((a,b) => b.days - a.days || b.list.length - a.list.length || stuName(a.sid).localeCompare(stuName(b.sid),'zh-Hans-CN'));
   return `
-    <div class="hint">共 ${arr.length} 名学生请过假（未请假的不列出）；天数含首尾、按天去重，请假中的算到今天。</div>
+    <div class="hint">口径：${statScopeText()}；共 ${arr.length} 名学生（未请假的不列出）；天数含首尾、按天去重，请假中的算到今天；起始日之前请假的那一段只计起始日之后的部分。</div>
     <div class="stat-scroll"><table class="tbl">
       <thead><tr><th style="width:110px">学生</th><th style="width:70px">次数</th><th style="width:80px">合计天数</th><th>请假明细（起 ~ 止）</th></tr></thead>
       <tbody>${arr.map(o => {
         const s = stuById(o.sid);
         const segs = o.list.slice().sort((a,b) => a.start_date < b.start_date ? 1 : -1).map(l => {
-          const end = leaveEnd(l);
+          const seg = statSeg(l, lvStatStart);
           const now = l.status === '请假中';
-          const txt = `${md(l.start_date)} ~ ${end?md(end):'未定'} · ${leaveDays(l)} 天${now?'（请假中）':''}`;
-          return `<span class="chip seg ${now?'now':''}">${txt}</span>`;
+          const clipNote = (seg?.clipped && lvStatStart) ? `（自 ${md(lvStatStart)} 起）` : '';
+          const txt = `${md(l.start_date)} ~ ${seg?md(seg.stop):'未定'} · 计 ${statDays(l)} 天${clipNote}${now?'（请假中）':''}`;
+          return `<span class="chip seg ${now?'now':''} ${seg?.clipped?'clip':''}">${txt}</span>`;
         }).join(' ');
         return `<tr>
           <td><b>${esc(s.name)}</b> <span class="${s.gender==='女'?'g-female':'g-male'}">${s.gender==='女'?'♀':'♂'}</span>${s.dorm?`<div class="hint" style="margin:0">${esc(s.dorm)}</div>`:''}</td>

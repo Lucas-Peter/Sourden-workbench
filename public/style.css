@@ -191,6 +191,19 @@ table.tbl tr.dim:hover td{background:#fff}
 .muted{color:var(--muted);font-size:12.5px;white-space:nowrap}
 .chip.seg{font-size:12px;background:#f1f5f9}
 .chip.seg.now{background:#fff1e6;color:var(--brand-deep);font-weight:600}
+.chip.seg.clip{background:#f8fafc;border:1px dashed #c7d0dc;color:#5d6b7d}
+/* 统计起始日开关 */
+.stat-scope{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;
+  padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fffdf8}
+.scope-sw{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:#334155;
+  cursor:pointer;user-select:none;white-space:nowrap}
+.scope-sw input{width:15px;height:15px;accent-color:var(--brand);cursor:pointer;margin:0}
+.scope-date{padding:2px 6px;border:1px solid var(--line);border-radius:7px;font:inherit;
+  font-size:12.5px;color:#334155;background:#fff}
+.scope-date:disabled{color:#9aa6b5;background:#f6f8fa;cursor:not-allowed}
+.scope-note{font-size:12px;color:var(--muted)}
+.scope-note b{color:var(--brand-deep);font-weight:700}
+@media (max-width:560px){ .stat-scope{gap:6px 8px} .scope-note{flex-basis:100%} }
 .stat-scroll{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:0 2px;background:#fff}
 .stat-scroll table.tbl th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:inset 0 -1px 0 var(--line)}
 .stat-scroll::-webkit-scrollbar{width:8px;height:8px}
