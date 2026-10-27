@@ -170,6 +170,43 @@ textarea{resize:vertical;min-height:64px}
 #toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:#1f2937;color:#fff;border-radius:9px;padding:9px 18px;font-size:13.5px;opacity:0;transition:.25s;z-index:200;pointer-events:none}
 #toast.show{opacity:.95}
 
+/* ===== 统计弹窗（请假 / 就餐共用） ===== */
+.statbar-flat{box-shadow:none;background:#fafbfc;margin-bottom:12px}
+.statbar-flat .st b{font-size:21px}
+.statbar-flat .st{padding:10px 6px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px;flex-wrap:wrap}
+.tabs.sub{border-bottom:none;gap:6px;margin-bottom:8px}
+.tab{padding:7px 14px;border-radius:8px 8px 0 0;cursor:pointer;font-size:13.5px;color:#64748b;
+  border:1px solid transparent;border-bottom:none;margin-bottom:-1px;user-select:none}
+.tab:hover{color:var(--brand-deep);background:#fff7ed}
+.tab.on{background:#fff;border-color:var(--line);color:var(--brand-deep);font-weight:700;box-shadow:inset 0 2px 0 var(--brand)}
+.tabs.sub .tab{border:1px solid var(--line);border-radius:999px;padding:3px 12px;margin-bottom:0;font-size:12.5px;background:#fff}
+.tabs.sub .tab.on{background:var(--brand);border-color:var(--brand);color:#fff;box-shadow:none}
+.stat-num{display:flex;align-items:center;gap:8px}
+.stat-num b{min-width:18px;text-align:right}
+.stat-num i{display:block;height:8px;border-radius:4px;background:var(--brand-grad);opacity:.8;max-width:110px;flex:1}
+table.tbl tr.dim td{color:#b3bcc9}
+table.tbl tr.dim:hover td{background:#fff}
+.wk{font-size:11.5px;color:var(--muted);margin-left:3px}
+.muted{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.chip.seg{font-size:12px;background:#f1f5f9}
+.chip.seg.now{background:#fff1e6;color:var(--brand-deep);font-weight:600}
+.stat-scroll{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:0 2px;background:#fff}
+.stat-scroll table.tbl th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:inset 0 -1px 0 var(--line)}
+.stat-scroll::-webkit-scrollbar{width:8px;height:8px}
+.stat-scroll::-webkit-scrollbar-thumb{background:#dde3ea;border-radius:6px}
+.stat-scroll table.tbl{min-width:520px}
+.stat-scroll table.tbl td b{white-space:nowrap}
+@media (max-width:560px){ .stat-scroll table.tbl{min-width:0} }
+.mini-chart{display:flex;align-items:flex-end;gap:6px;height:120px;padding:6px 4px 0;
+  border-bottom:1px solid var(--line);margin:8px 0 6px;overflow-x:auto}
+.mini-chart .col{flex:1;min-width:22px;height:100%;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;gap:2px}
+.mini-chart .col b{font-size:10.5px;color:var(--brand-deep);line-height:1}
+.mini-chart .col i{width:100%;max-width:26px;min-height:2px;max-height:calc(100% - 32px);border-radius:4px 4px 0 0;
+  background:linear-gradient(180deg,#fb923c,#f97316)}
+.mini-chart .col span{font-size:10.5px;color:var(--muted);white-space:nowrap;line-height:1.2}
+
 /* 响应式 */
 @media (max-width:900px){
   .layout{flex-direction:column}

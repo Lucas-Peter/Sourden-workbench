@@ -85,6 +85,26 @@ const pad = n => String(n).padStart(2, '0');
 function dstr(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
 const today = () => dstr(new Date());
 const tomorrow = () => dstr(new Date(Date.now()+86400000));
+// 日期按 UTC 分量计算，避免本地时区把 'YYYY-MM-DD' 解析偏一天
+function addDays(ds, n){
+  const [y,m,d] = ds.split('-').map(Number);
+  return new Date(Date.UTC(y, m-1, d+n)).toISOString().slice(0,10);
+}
+function dayDiff(a, b){
+  const [y1,m1,d1] = a.split('-').map(Number), [y2,m2,d2] = b.split('-').map(Number);
+  return Math.round((Date.UTC(y2,m2-1,d2) - Date.UTC(y1,m1-1,d1)) / 86400000);
+}
+const WEEK_CN = '日一二三四五六';
+function weekdayCN(ds){
+  const [y,m,d] = ds.split('-').map(Number);
+  return '周' + WEEK_CN[new Date(Date.UTC(y, m-1, d)).getUTCDay()];
+}
+// 短日期：10-27（同年）/ 2026-10-27（跨年）
+function md(ds){
+  if (!ds) return '未定';
+  const y = String(new Date().getFullYear());
+  return ds.slice(0,4) === y ? ds.slice(5) : ds;
+}
 const stuById = id => S.students.find(x => x.id === Number(id));
 // 花名册统一排序：男在前、女在后，同性别按姓名拼音升序（所有选人处共用）
 const stuSorted = () => [...S.students].sort((a,b)=>(a.gender===b.gender?0:(a.gender==='男'?-1:1))||a.name.localeCompare(b.name,'zh-Hans-CN'));
@@ -114,6 +134,43 @@ function leaveIdsOn(date){
   return set;
 }
 const uncheckedStu = (f) => S.students.filter(f);
+
+/* ---------- 请假统计（只读派生，不改数据） ---------- */
+// 一条请假记录的"实际结束日"：销假日 > 预计结束日 > 未定
+const leaveEnd = l => l.returned_at || l.end_date || null;
+// 该条记录是否覆盖某一天（未定结束的只算到今天，未来预计结束日也封顶到今天）
+function leaveCovers(l, d){
+  if (d < l.start_date) return false;
+  const end = leaveEnd(l);
+  const stop = (!end || end > today()) ? today() : end;
+  return d <= stop;
+}
+// 已请假天数（含首尾）；未销假的算到今天，不把未来的预计日算进去
+function leaveDays(l){
+  const end = leaveEnd(l);
+  const stop = (!end || end > today()) ? today() : end;
+  return Math.max(1, dayDiff(l.start_date, stop) + 1);
+}
+// 当日请假学生集合（按学生去重；含已返校但当天仍在假期内的历史记录）
+function leaveSetOn(d){
+  const set = new Set();
+  for (const l of S.leaves) if (leaveCovers(l, d)) set.add(l.student_id);
+  return set;
+}
+// 统计口径：只取花名册里还在的学生
+const leaveRows = () => S.leaves.filter(l => stuById(l.student_id));
+// 每个学生实际请假的日期集合（多段重叠按天去重）
+function leaveDaySets(){
+  const map = new Map();
+  for (const l of leaveRows()) {
+    if (!map.has(l.student_id)) map.set(l.student_id, new Set());
+    const end = leaveEnd(l);
+    const stop = (!end || end > today()) ? today() : end;
+    const set = map.get(l.student_id);
+    for (let d = l.start_date; d <= stop; d = addDays(d, 1)) set.add(d);
+  }
+  return map;
+}
 
 /* ---------- 顶栏 & 导航 ---------- */
 function renderTop(){
@@ -260,6 +317,7 @@ function pgLeaves(){
   $('#main').innerHTML = `
     <div class="page-head"><div class="page-title">📋 今日请假</div>
       <div class="head-actions">
+        <button class="btn" onclick="leaveStatsModal()">📊 请假统计</button>
         <button class="btn" onclick="leaveModal(true)">📋 批量登记</button>
         <button class="btn primary" onclick="leaveModal(false)">＋ 新增请假</button>
       </div></div>
@@ -314,6 +372,105 @@ function leaveModal(batch, id){
     } else { await api('/leaves','POST',{...body, student_ids:[Number(m.querySelector('#lv-one').value)]}); }
     closeModal(); await refresh(); toast('已保存');
   };
+}
+
+/* ============ 请假统计（两个维度） ============ */
+let lvStatTab = 'date', lvStatRange = 30;
+function leaveStatsModal(){
+  const rows = leaveRows();
+  const stuN = new Set(rows.map(l => l.student_id)).size;
+  const totalDays = [...leaveDaySets().values()].reduce((n,set) => n + set.size, 0);
+  const activeN = leaveSetOn(today()).size;
+  const overdue = rows.filter(l => l.status==='请假中' && l.end_date && l.end_date < today()).length;
+  openModal(`${modalHead('📊 请假统计')}
+    <div class="m-body">
+      <div class="statbar statbar-flat">
+        <div class="st"><b>${stuN}</b><span>请假学生</span></div>
+        <div class="st"><b>${rows.length}</b><span>请假次数</span></div>
+        <div class="st"><b>${totalDays}</b><span>累计天数</span></div>
+        <div class="st warn"><b>${activeN}</b><span>当前请假中</span></div>
+      </div>
+      ${overdue?`<div class="note-strip">有 ${overdue} 条记录仍在"请假中"但已过预计结束日，请及时销假</div>`:''}
+      <div class="tabs">
+        <div class="tab ${lvStatTab==='date'?'on':''}" data-tab="date">📅 按日期</div>
+        <div class="tab ${lvStatTab==='stu'?'on':''}" data-tab="stu">👤 按学生</div>
+      </div>
+      <div id="lvst-body"></div>
+    </div>
+    <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
+  const m = $('#modal-root');
+  m.querySelectorAll('.tab').forEach(t => t.onclick = () => { lvStatTab = t.dataset.tab; leaveStatsModal(); });
+  renderLeaveStats();
+}
+function renderLeaveStats(){
+  const el = $('#lvst-body'); if (!el) return;
+  el.innerHTML = lvStatTab === 'date' ? leaveStatsByDate() : leaveStatsByStudent();
+  el.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { lvStatRange = Number(b.dataset.range); renderLeaveStats(); });
+}
+// 维度一：按日期——每天有多少学生请假
+function leaveStatsByDate(){
+  const rows = leaveRows();
+  if (!rows.length) return '<div class="empty">还没有请假记录</div>';
+  const end = today();
+  const days = [];
+  if (lvStatRange === 0) {
+    let min = rows[0].start_date;
+    for (const l of rows) if (l.start_date < min) min = l.start_date;
+    if (dayDiff(min, end) > 366) min = addDays(end, -366);
+    for (let d = min; d <= end; d = addDays(d,1)) days.push(d);
+  } else {
+    for (let i = lvStatRange - 1; i >= 0; i--) days.push(addDays(end, -i));
+  }
+  const list = days.map(d => ({ d, set: leaveSetOn(d) })).reverse(); // 最新在上
+  const max = Math.max(1, ...list.map(x => x.set.size));
+  const hit = list.filter(x => x.set.size > 0).length;
+  const rangeBtn = (v, label) => `<span class="tab ${lvStatRange===v?'on':''}" data-range="${v}">${label}</span>`;
+  return `
+    <div class="tabs sub">${rangeBtn(7,'近 7 天')}${rangeBtn(30,'近 30 天')}${rangeBtn(0,'全部')}</div>
+    <div class="hint">共 ${list.length} 天，其中 ${hit} 天有人请假；人数按学生去重，含已返校但当天仍在假期内的记录。</div>
+    <div class="stat-scroll"><table class="tbl">
+      <thead><tr><th style="width:110px">日期</th><th style="width:120px">请假人数</th><th>请假学生</th></tr></thead>
+      <tbody>${list.map(({d,set}) => `<tr class="${set.size?'':'dim'}">
+        <td>${md(d)} <span class="wk">${weekdayCN(d)}</span></td>
+        <td><div class="stat-num"><b>${set.size||'—'}</b>${set.size?`<i style="width:${Math.round(set.size/max*100)}%"></i>`:''}</div></td>
+        <td>${set.size ? [...set].map(id => `<span class="chip">${esc(stuName(id))}</span>`).join(' ') : '<span class="hint">无人请假</span>'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+}
+// 维度二：按学生——各请了多少天、起止日期
+function leaveStatsByStudent(){
+  const rows = leaveRows();
+  if (!rows.length) return '<div class="empty">还没有请假记录</div>';
+  const map = new Map();
+  for (const l of rows) {
+    const k = l.student_id;
+    if (!map.has(k)) map.set(k, { sid:k, list:[] });
+    map.get(k).list.push(l);
+  }
+  // 按天去重：同一学生多段重叠时，累计天数不重复计
+  const daySets = leaveDaySets();
+  const arr = [...map.values()].map(o => ({ ...o, days: daySets.get(o.sid)?.size || 0 }))
+    .sort((a,b) => b.days - a.days || b.list.length - a.list.length || stuName(a.sid).localeCompare(stuName(b.sid),'zh-Hans-CN'));
+  return `
+    <div class="hint">共 ${arr.length} 名学生请过假（未请假的不列出）；天数含首尾、按天去重，请假中的算到今天。</div>
+    <div class="stat-scroll"><table class="tbl">
+      <thead><tr><th style="width:110px">学生</th><th style="width:70px">次数</th><th style="width:80px">合计天数</th><th>请假明细（起 ~ 止）</th></tr></thead>
+      <tbody>${arr.map(o => {
+        const s = stuById(o.sid);
+        const segs = o.list.slice().sort((a,b) => a.start_date < b.start_date ? 1 : -1).map(l => {
+          const end = leaveEnd(l);
+          const now = l.status === '请假中';
+          const txt = `${md(l.start_date)} ~ ${end?md(end):'未定'} · ${leaveDays(l)} 天${now?'（请假中）':''}`;
+          return `<span class="chip seg ${now?'now':''}">${txt}</span>`;
+        }).join(' ');
+        return `<tr>
+          <td><b>${esc(s.name)}</b> <span class="${s.gender==='女'?'g-female':'g-male'}">${s.gender==='女'?'♀':'♂'}</span>${s.dorm?`<div class="hint" style="margin:0">${esc(s.dorm)}</div>`:''}</td>
+          <td>${o.list.length}</td>
+          <td><b>${o.days}</b></td>
+          <td>${segs}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
 }
 
 /* ============ 页面：班级花名册 ============ */
@@ -544,6 +701,7 @@ function pgDining(){
       <div style="text-align:center;padding:12px 0">
         <div style="font-size:56px;font-weight:800;color:var(--red);line-height:1">${final} <span style="font-size:18px">人</span></div>
         <div class="head-actions" style="justify-content:center;margin-top:14px">
+          <button class="btn primary" onclick="diningStatsModal()">📊 就餐统计</button>
           <button class="btn" onclick="diningHistoryModal()">📋 上报记录</button>
           <button class="btn" onclick="diningCopy(${final},'${date}')">📄 复制文字</button>
         </div>
@@ -607,6 +765,54 @@ async function diningOptoutRemove(id){
 function diningCopy(final, date){
   const txt = `明日（${date}）就餐人数：${final} 人`;
   navigator.clipboard.writeText(txt).then(()=>toast('已复制：'+txt));
+}
+/* ============ 就餐统计（每日上报人数） ============ */
+// 口径说明：dining_history 以 date 为主键，每次保存都覆盖同一天，
+// 所以这里读到的就是"该就餐日期最后一次保存的数据"，saved_at 即上报时间。
+function diningStatsModal(){
+  const rows = [...S.dining_history].sort((a,b) => a.date < b.date ? 1 : -1); // 最新在上
+  if (!rows.length) {
+    openModal(`${modalHead('📊 就餐统计')}
+      <div class="m-body"><div class="empty">还没有上报记录<br><span class="hint">在就餐页调整人数或不吃名单后自动记录</span></div></div>
+      <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
+    return;
+  }
+  const finals = rows.map(r => Number(r.final)||0);
+  const avg = Math.round(finals.reduce((a,b)=>a+b,0) / finals.length);
+  const maxV = Math.max(...finals), minV = Math.min(...finals);
+  const last = rows[0];
+  const recent = rows.slice(0, 14).reverse(); // 图上从旧到新
+  const peak = Math.max(1, ...recent.map(r => Number(r.final)||0));
+  const hm = ts => { if (!ts) return '—'; const d = new Date(Number(ts));
+    return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  openModal(`${modalHead('📊 就餐统计')}
+    <div class="m-body">
+      <div class="statbar statbar-flat">
+        <div class="st"><b>${rows.length}</b><span>已上报天数</span></div>
+        <div class="st"><b>${avg}</b><span>平均就餐</span></div>
+        <div class="st"><b>${Number(last.final)||0}</b><span>最近一次（${md(last.date)}）</span></div>
+        <div class="st"><b>${maxV}<span style="font-size:13px;color:var(--muted)"> / ${minV}</span></b><span>最高 / 最低</span></div>
+      </div>
+      <div class="hint">每天上报后记一行；同一日期只保留<b>最后一次保存</b>的数据，"上报时间"即该次保存时刻（一般是就餐日期的前一天晚上）。</div>
+      <div class="mini-chart">${recent.map(r => {
+        const v = Number(r.final)||0;
+        return `<div class="col" title="${esc(r.date)}：${v} 人"><b>${v}</b><i style="height:${Math.round(v/peak*100)}%"></i><span>${md(r.date)}</span></div>`;
+      }).join('')}</div>
+      <div class="hint" style="text-align:center">最近 ${recent.length} 天就餐人数趋势</div>
+      <div class="stat-scroll"><table class="tbl">
+        <thead><tr><th>就餐日期</th><th>就餐人数</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th><th>上报时间</th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td>${md(r.date)} <span class="wk">${weekdayCN(r.date)}</span></td>
+          <td><b style="color:var(--brand-deep);font-size:15px">${Number(r.final)||0}</b></td>
+          <td>${r.total||0}</td>
+          <td>${r.onleave||0}</td>
+          <td>${r.optout||0}</td>
+          <td>${(Number(r.plus)||0)-(Number(r.minus)||0)}</td>
+          <td class="muted">${hm(r.saved_at)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </div>
+    <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
 }
 function diningHistoryModal(){
   openModal(`${modalHead('📋 上报记录')}
