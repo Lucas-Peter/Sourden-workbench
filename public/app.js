@@ -831,6 +831,7 @@ function pgDining(){
         </div>
         <div class="field" style="display:flex;justify-content:space-between"><span>手动调整</span><b>${Number(daily.plus||0)-Number(daily.minus||0)}</b></div>
         <div class="field" style="display:flex;justify-content:space-between;background:#fef2f2;border-radius:8px;padding:8px 10px"><b>应就餐人数</b><b style="color:var(--red);font-size:18px">${final}</b></div>
+        <div class="hint" style="margin-top:8px">📌 不手动改也会自动上报：系统每天按「总人数 − 请假 − 不就餐 + 手动±」记一条；你手动改过的日期以你改的为准。</div>
       </div>
     </div>
     <div class="card">
@@ -883,7 +884,7 @@ function diningStatsModal(){
   const rows = [...S.dining_history].sort((a,b) => a.date < b.date ? 1 : -1); // 最新在上
   if (!rows.length) {
     openModal(`${modalHead('📊 就餐统计')}
-      <div class="m-body"><div class="empty">还没有上报记录<br><span class="hint">在就餐页调整人数或不吃名单后自动记录</span></div></div>
+      <div class="m-body"><div class="empty">还没有上报记录<br><span class="hint">系统每天会自动按当天数据上报；手动调整人数或不吃名单也会记录</span></div></div>
       <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
     return;
   }
@@ -903,14 +904,14 @@ function diningStatsModal(){
         <div class="st"><b>${Number(last.final)||0}</b><span>最近一次（${md(last.date)}）</span></div>
         <div class="st"><b>${maxV}<span style="font-size:13px;color:var(--muted)"> / ${minV}</span></b><span>最高 / 最低</span></div>
       </div>
-      <div class="hint">每天上报后记一行；同一日期只保留<b>最后一次保存</b>的数据，"上报时间"即该次保存时刻（一般是就餐日期的前一天晚上）。</div>
+      <div class="hint">每天记一行：手动上报过的日期以你保存的数据为准（标「手动」），没手动调整的日期由系统按当天最后的数据自动补报（标「自动」）。</div>
       <div class="mini-chart">${recent.map(r => {
         const v = Number(r.final)||0;
         return `<div class="col" title="${esc(r.date)}：${v} 人"><b>${v}</b><i style="height:${Math.round(v/peak*100)}%"></i><span>${md(r.date)}</span></div>`;
       }).join('')}</div>
       <div class="hint" style="text-align:center">最近 ${recent.length} 天就餐人数趋势</div>
       <div class="stat-scroll"><table class="tbl">
-        <thead><tr><th>就餐日期</th><th>就餐人数</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th><th>上报时间</th></tr></thead>
+        <thead><tr><th>就餐日期</th><th>就餐人数</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th><th>上报时间</th><th>来源</th></tr></thead>
         <tbody>${rows.map(r => `<tr>
           <td>${md(r.date)} <span class="wk">${weekdayCN(r.date)}</span></td>
           <td><b style="color:var(--brand-deep);font-size:15px">${Number(r.final)||0}</b></td>
@@ -918,17 +919,20 @@ function diningStatsModal(){
           <td>${r.onleave||0}</td>
           <td>${r.optout||0}</td>
           <td>${(Number(r.plus)||0)-(Number(r.minus)||0)}</td>
-          <td class="muted">${hm(r.saved_at)}</td>
+          <td class="muted">${r.source==='auto'?'—':hm(r.saved_at)}</td>
+          <td>${r.source==='auto'?'<span class="pill lo">自动</span>':'<span class="pill ok">手动</span>'}</td>
         </tr>`).join('')}</tbody>
       </table></div>
     </div>
     <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`, true);
 }
 function diningHistoryModal(){
+  const rows = [...S.dining_history].sort((a,b)=> a.date < b.date ? 1 : -1);
   openModal(`${modalHead('📋 上报记录')}
-    <div class="m-body">${S.dining_history.length?`<table class="tbl"><thead><tr><th>日期</th><th>应就餐</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th></tr></thead><tbody>
-      ${S.dining_history.map(h=>`<tr><td>${esc(h.date)}</td><td><b>${h.final}</b></td><td>${h.total}</td><td>${h.onleave}</td><td>${h.optout}</td><td>${h.plus-h.minus}</td></tr>`).join('')}
-      </tbody></table>`:'<div class="empty">暂无上报记录（调整人数后自动记录）</div>'}</div>
+    <div class="m-body">${rows.length?`<table class="tbl"><thead><tr><th>日期</th><th>应就餐</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th><th>来源</th></tr></thead><tbody>
+      ${rows.map(h=>`<tr><td>${esc(h.date)}</td><td><b>${h.final}</b></td><td>${h.total}</td><td>${h.onleave}</td><td>${h.optout}</td><td>${(Number(h.plus)||0)-(Number(h.minus)||0)}</td>
+        <td>${h.source==='auto'?'<span class="pill lo">自动</span>':'<span class="pill ok">手动</span>'}</td></tr>`).join('')}
+      </tbody></table>`:'<div class="empty">暂无上报记录（系统会按每天的数据自动补报）</div>'}</div>
     <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`);
 }
 async function tableAdd(){ await api('/tables','POST',{label:(S.tables.length+1)+'号桌'}); await refresh(); }
