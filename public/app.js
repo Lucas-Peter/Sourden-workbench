@@ -129,12 +129,17 @@ function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('sh
 async function refresh(){ S = await api('/state'); renderTop(); renderNav(); render(); }
 
 /* ---------- 请假联动（核心） ---------- */
+// 一条请假记录是否覆盖某一天（与后端 leaveCoversOn 完全同口径）
+// 结束点：销假日 > 预计结束日 > 未定（未定且已不是「请假中」则不算覆盖）
+function leaveCoversOn(l, d){
+  if (!l.start_date || l.start_date > d) return false;
+  const stop = l.returned_at || l.end_date;
+  if (stop) return stop >= d;
+  return l.status === '请假中';
+}
 function leaveIdsOn(date){
   const set = new Set();
-  for (const l of S.leaves) {
-    if (l.status !== '请假中') continue;
-    if (l.start_date <= date && (!l.end_date || l.end_date >= date)) set.add(l.student_id);
-  }
+  for (const l of S.leaves) if (leaveCoversOn(l, date)) set.add(l.student_id);
   return set;
 }
 const uncheckedStu = (f) => S.students.filter(f);
@@ -853,7 +858,7 @@ function pgDining(){
         </div>
         <div class="field" style="display:flex;justify-content:space-between"><span>手动调整</span><b>${Number(daily.plus||0)-Number(daily.minus||0)}</b></div>
         <div class="field" style="display:flex;justify-content:space-between;background:#fef2f2;border-radius:8px;padding:8px 10px"><b>应就餐人数</b><b style="color:var(--red);font-size:18px">${final}</b></div>
-        <div class="hint" style="margin-top:8px">📌 不手动改也会自动上报：系统每天 <b>23:00</b> 按「总人数 − 请假 − 不就餐 + 手动±」记一条（之后再有请假/调整会更新到最新）；你手动改过的日期以你改的为准。</div>
+        <div class="hint" style="margin-top:8px">📌 不手动改也会自动上报：系统每天 <b>23:00</b> 按「总人数 − 请假 − 不就餐 + 手动±」记一条；今天和明天以自动重算为准（会更正早先手动报的数字），今天以前的手动记录不再改动。</div>
       </div>
     </div>
     <div class="card">
@@ -900,6 +905,12 @@ function diningCopy(final, date){
   navigator.clipboard.writeText(txt).then(()=>toast('已复制：'+txt));
 }
 /* ============ 就餐统计（每日上报人数） ============ */
+// 来源标签：自动上报覆盖过手动值时，把被覆盖的手动人数一并显示出来，便于对账
+function srcPill(r){
+  if (r.source !== 'auto') return '<span class="pill ok">手动</span>';
+  const mf = r.manual_final;
+  return '<span class="pill lo">自动</span>' + (mf===null||mf===undefined||mf===''?'':`<span class="chip" style="margin-left:4px">曾手动 ${Number(mf)||0}</span>`);
+}
 // 口径说明：dining_history 以 date 为主键，每次保存都覆盖同一天，
 // 所以这里读到的就是"该就餐日期最后一次保存的数据"，saved_at 即上报时间。
 function diningStatsModal(){
@@ -926,7 +937,7 @@ function diningStatsModal(){
         <div class="st"><b>${Number(last.final)||0}</b><span>最近一次（${md(last.date)}）</span></div>
         <div class="st"><b>${maxV}<span style="font-size:13px;color:var(--muted)"> / ${minV}</span></b><span>最高 / 最低</span></div>
       </div>
-      <div class="hint">每天记一行：手动上报过的日期以你保存的数据为准（标「手动」），没手动调整的日期由系统按当天最后的数据自动补报（标「自动」）。</div>
+      <div class="hint">每天记一行：今天、明天以<b>系统自动重算</b>为准（数据更晚更准，会覆盖早先的手动上报，并在来源里留「曾手动 42」）；今天以前的手动记录视为定稿，不会被改写。</div>
       <div class="mini-chart">${recent.map(r => {
         const v = Number(r.final)||0;
         return `<div class="col" title="${esc(r.date)}：${v} 人"><b>${v}</b><i style="height:${Math.round(v/peak*100)}%"></i><span>${md(r.date)}</span></div>`;
@@ -942,7 +953,7 @@ function diningStatsModal(){
           <td>${r.optout||0}</td>
           <td>${(Number(r.plus)||0)-(Number(r.minus)||0)}</td>
           <td class="muted">${r.source==='auto'?'—':hm(r.saved_at)}</td>
-          <td>${r.source==='auto'?'<span class="pill lo">自动</span>':'<span class="pill ok">手动</span>'}</td>
+          <td>${srcPill(r)}</td>
         </tr>`).join('')}</tbody>
       </table></div>
     </div>
@@ -953,7 +964,7 @@ function diningHistoryModal(){
   openModal(`${modalHead('📋 上报记录')}
     <div class="m-body">${rows.length?`<table class="tbl"><thead><tr><th>日期</th><th>应就餐</th><th>总人数</th><th>请假</th><th>不就餐</th><th>手动±</th><th>来源</th></tr></thead><tbody>
       ${rows.map(h=>`<tr><td>${esc(h.date)}</td><td><b>${h.final}</b></td><td>${h.total}</td><td>${h.onleave}</td><td>${h.optout}</td><td>${(Number(h.plus)||0)-(Number(h.minus)||0)}</td>
-        <td>${h.source==='auto'?'<span class="pill lo">自动</span>':'<span class="pill ok">手动</span>'}</td></tr>`).join('')}
+        <td>${srcPill(h)}</td></tr>`).join('')}
       </tbody></table>`:'<div class="empty">暂无上报记录（系统会按每天的数据自动补报）</div>'}</div>
     <div class="m-foot"><button class="btn primary" onclick="closeModal()">关闭</button></div>`);
 }
