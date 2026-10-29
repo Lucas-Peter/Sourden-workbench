@@ -333,64 +333,81 @@ async function clearDormCheck(env, b) {
 }
 
 // ---------- 就餐 ----------
-// dining_history.source：manual = 老师手动上报；auto = 系统按当天数据自动补报
-// 老库没有这一列时惰性补上（每个 Worker 实例只检查一次，无需手动跑 SQL）
+// dining_history.source：manual = 老师手动上报；auto = 系统按当天数据自动上报
+// dining_history.manual_final：自动覆盖手动时，留一手动值（界面上显示「手动 42」）
+// 老库没有这些列时惰性补上（每个 Worker 实例只检查一次，无需手动跑 SQL）
 let diningSchemaReady = false;
 let diningHasSource = false;
+let diningHasManualFinal = false;
 async function ensureDiningSchema(env) {
   if (diningSchemaReady) return diningHasSource;
   diningSchemaReady = true;
   try {
     const cols = await all(env, "SELECT name FROM pragma_table_info('dining_history')");
-    diningHasSource = Array.isArray(cols) && cols.some(c => c.name === 'source');
-    if (!diningHasSource) {
-      await run(env, "ALTER TABLE dining_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
-      diningHasSource = true;
-    }
-  } catch (e) {
-    // 加列失败（极少见）：退回不带 source 的老写法，功能不受影响，只是分不出自动/手动
-    try {
-      await run(env, "ALTER TABLE dining_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
-      diningHasSource = true;
-    } catch (e2) { diningHasSource = false; }
+    const names = (Array.isArray(cols) ? cols : []).map(c => c.name);
+    diningHasSource = names.includes('source');
+    diningHasManualFinal = names.includes('manual_final');
+  } catch (e) { diningHasSource = false; diningHasManualFinal = false; }
+  if (!diningHasSource) {
+    try { await run(env, "ALTER TABLE dining_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"); diningHasSource = true; } catch (e) {}
+  }
+  if (!diningHasManualFinal) {
+    try { await run(env, 'ALTER TABLE dining_history ADD COLUMN manual_final INTEGER'); diningHasManualFinal = true; } catch (e) {}
   }
   return diningHasSource;
 }
 
 // 写一行上报快照：同一日期只保留最后一次
-function historyUpsert(env, c, source) {
-  const base = 'INSERT INTO dining_history(date,total,onleave,optout,plus,minus,final,saved_at';
-  const upd = 'ON CONFLICT(date) DO UPDATE SET total=excluded.total, onleave=excluded.onleave, optout=excluded.optout, plus=excluded.plus, minus=excluded.minus, final=excluded.final, saved_at=excluded.saved_at';
+// manualFinal：本次是自动覆盖手动时，传被覆盖的手动值；手动保存/普通自动更新传 null
+function historyUpsert(env, c, source, manualFinal) {
+  const cols = ['date', 'total', 'onleave', 'optout', 'plus', 'minus', 'final', 'saved_at'];
   const args = [c.date, c.total, c.onleave, c.optout, c.plus, c.minus, c.final, Date.now()];
+  let upd = 'ON CONFLICT(date) DO UPDATE SET total=excluded.total, onleave=excluded.onleave, optout=excluded.optout, plus=excluded.plus, minus=excluded.minus, final=excluded.final, saved_at=excluded.saved_at';
   if (diningHasSource) {
-    return env.DB.prepare(`${base},source) VALUES (?,?,?,?,?,?,?,?,?) ${upd}, source=excluded.source`)
-      .bind(...args, source);
+    cols.push('source'); args.push(source); upd += ', source=excluded.source';
   }
-  return env.DB.prepare(`${base}) VALUES (?,?,?,?,?,?,?,?) ${upd}`).bind(...args);
+  if (diningHasManualFinal) {
+    cols.push('manual_final'); args.push(manualFinal == null ? null : Number(manualFinal));
+    // 手动保存 → 清空（以手动为准）；自动覆盖 → 记住被覆盖的手动值，且不覆盖更早记住的那个
+    upd += diningHasSource
+      ? ", manual_final=CASE WHEN excluded.source='manual' THEN NULL ELSE COALESCE(manual_final, excluded.manual_final) END"
+      : ', manual_final=COALESCE(manual_final, excluded.manual_final)';
+  }
+  return env.DB.prepare(`INSERT INTO dining_history(${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')}) ${upd}`)
+    .bind(...args);
 }
 
 // 一次性把算就餐人数要用的数据读进内存，避免按天循环查库
 async function diningContext(env) {
   const [stuRow, leaves, optouts, dailies] = await Promise.all([
     first(env, 'SELECT COUNT(*) AS n FROM students'),
-    all(env, 'SELECT start_date, end_date, returned_at FROM leaves'),
+    all(env, 'SELECT student_id, start_date, end_date, returned_at, status FROM leaves'),
     all(env, 'SELECT date, COUNT(*) AS n FROM dining_optout GROUP BY date'),
     all(env, 'SELECT date, plus, minus FROM dining_daily'),
   ]);
   return {
     total: (stuRow && stuRow.n) || 0,
     // 请假按日期区间判断（含销假日），历史日期也能还原出当天真实人数
-    leaves: leaves.map(l => ({ student_id: l.student_id, start_date: l.start_date, stop: l.returned_at || l.end_date || '' })),
+    leaves: leaves.map(l => ({ student_id: l.student_id, start_date: l.start_date,
+      stop: l.returned_at || l.end_date || '', status: l.status })),
     optoutByDate: new Map(optouts.map(r => [r.date, r.n])),
     dailyByDate: new Map(dailies.map(r => [r.date, r])),
   };
+}
+
+// 一条请假记录是否覆盖某就餐日（与前端 leaveCoversOn 完全同口径）
+// 结束点：销假日 > 预计结束日 > 未定（未定且已不是「请假中」则不覆盖任何日期）
+function leaveCoversOn(l, date) {
+  if (!l.start_date || l.start_date > date) return false;
+  if (l.stop) return l.stop >= date;
+  return l.status === '请假中';
 }
 
 // 某就餐日的应吃人数 = 总人数 - 当天请假 - 不就餐 + 手动增 - 手动减
 // 请假按「学生」去重：同一人有多条重叠记录（重复登记）只算一人，与前端口径一致
 function diningStatsFor(date, ctx) {
   const onSet = new Set();
-  for (const l of ctx.leaves) if (l.start_date <= date && (l.stop || '9999-12-31') >= date) onSet.add(l.student_id);
+  for (const l of ctx.leaves) if (leaveCoversOn(l, date)) onSet.add(l.student_id);
   const onleave = onSet.size;
   const optout = ctx.optoutByDate.get(date) || 0;
   const daily = ctx.dailyByDate.get(date) || {};
@@ -399,9 +416,12 @@ function diningStatsFor(date, ctx) {
     final: Math.max(0, ctx.total - onleave - optout + plus - minus) };
 }
 
-// 自动上报：把「已经到日子但没有人报过」的就餐日按当天最后的数据补一条记录。
-// 手动报过的日期一律不动（以老师为准）；自动记录会在数据变化时更新为最新值。
-// 只回溯最近 7 天（够补上忘了打开工作台的几天），不去改写很久以前的历史。
+// 自动上报：按「当前真实数据」重算并写快照。
+// 覆盖规则：
+//   - 今天以前（历史日）：老师手动报过的就是定稿，一律不动；自动记录照旧随数据更新
+//   - 今天 / 明天：数据还会变，自动跑得比手动晚 → 用最新数据覆盖手动的旧值（并留一手动值备查）
+// 范围：最近 7 天（含今天）；「明天」只在已经有一条记录时才纳入，避免把没报过的日子凭空补出来，
+//      也保证老师删掉周末那行后不会被重新生成。
 const DINING_AUTO_DAYS = 7;
 async function ensureDiningHistory(env) {
   await ensureDiningSchema(env);
@@ -411,23 +431,28 @@ async function ensureDiningHistory(env) {
   ]);
   const histByDate = new Map(hist.map(r => [r.date, r]));
   const today = bjToday();
+  const tomorrow = addDaysStr(today, 1);
+  // 明天已有记录（老师已经上报过）→ 一起纳入重算，让明早备餐用最新数字
+  const until = histByDate.has(tomorrow) ? tomorrow : today;
   // 补报起点：最早有就餐数据的那天（历史记录 / 手动增减 / 不吃名单 / 请假），且最多回溯 7 天
   const starts = [today, ...hist.map(r => r.date), ...ctx.dailyByDate.keys(),
     ...ctx.optoutByDate.keys(), ...ctx.leaves.map(l => l.start_date)].filter(Boolean).sort();
   const floor = addDaysStr(today, -(DINING_AUTO_DAYS - 1));
   let from = starts[0] || today;
   if (from < floor) from = floor;
-  if (from > today) from = today;   // 只有未来日期的记录时，也要保证今天被检查
+  if (from > until) from = until;   // 只有未来日期的记录时，也要保证今天被检查
   const stmts = [];
-  for (let d = from; d <= today; d = addDaysStr(d, 1)) {
+  for (let d = from; d <= until; d = addDaysStr(d, 1)) {
     const old = histByDate.get(d);
-    if (old && old.source !== 'auto') continue;          // 老师手动报过 → 保持不动
+    // 历史日的手动记录 = 已定稿，不改写
+    if (old && old.source !== 'auto' && d < today) continue;
     const c = diningStatsFor(d, ctx);
     if (old
       && Number(old.final) === c.final && Number(old.total) === c.total
       && Number(old.onleave) === c.onleave && Number(old.optout) === c.optout
-      && Number(old.plus) === c.plus && Number(old.minus) === c.minus) continue; // 没变化就不写库
-    stmts.push(historyUpsert(env, c, 'auto'));
+      && Number(old.plus) === c.plus && Number(old.minus) === c.minus) continue; // 值没变 → 原样保留（手动继续标手动）
+    const overwritten = (old && old.source !== 'auto') ? Number(old.final) : null;
+    stmts.push(historyUpsert(env, c, 'auto', overwritten));
   }
   if (stmts.length) {
     if (typeof env.DB.batch === 'function') await env.DB.batch(stmts);

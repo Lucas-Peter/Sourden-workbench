@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL DEFAULT ''
 );
 
--- 就餐上报历史快照（保存上报时写入）
+-- 就餐上报历史快照（手动保存 / 系统自动补报）
 CREATE TABLE IF NOT EXISTS dining_history (
   date      TEXT PRIMARY KEY,
   total     INTEGER NOT NULL DEFAULT 0,
@@ -125,7 +125,9 @@ CREATE TABLE IF NOT EXISTS dining_history (
   plus      INTEGER NOT NULL DEFAULT 0,
   minus     INTEGER NOT NULL DEFAULT 0,
   final     INTEGER NOT NULL DEFAULT 0,
-  saved_at  INTEGER
+  saved_at  INTEGER,
+  source       TEXT NOT NULL DEFAULT 'manual',  -- manual=老师手动上报 / auto=系统按当前数据自动上报
+  manual_final INTEGER                          -- 自动覆盖手动时，留一手动值备查（界面显示「曾手动 42」）
 );
 
 CREATE INDEX IF NOT EXISTS idx_leaves_student ON leaves(student_id);
