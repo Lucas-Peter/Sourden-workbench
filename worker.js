@@ -242,7 +242,7 @@ async function patchLeave(env, id, b) {
   return true;
 }
 async function returnLeave(env, id) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = bjToday();   // 按北京时间取返校日（UTC 会使 0-8 点登记成前一天）
   const r = await run(env, "UPDATE leaves SET status='已返校', returned_at=? WHERE id=?", today, id);
   return r.meta.changes > 0;
 }
@@ -380,15 +380,18 @@ async function diningContext(env) {
   return {
     total: (stuRow && stuRow.n) || 0,
     // 请假按日期区间判断（含销假日），历史日期也能还原出当天真实人数
-    leaves: leaves.map(l => ({ start_date: l.start_date, stop: l.returned_at || l.end_date || '' })),
+    leaves: leaves.map(l => ({ student_id: l.student_id, start_date: l.start_date, stop: l.returned_at || l.end_date || '' })),
     optoutByDate: new Map(optouts.map(r => [r.date, r.n])),
     dailyByDate: new Map(dailies.map(r => [r.date, r])),
   };
 }
 
 // 某就餐日的应吃人数 = 总人数 - 当天请假 - 不就餐 + 手动增 - 手动减
+// 请假按「学生」去重：同一人有多条重叠记录（重复登记）只算一人，与前端口径一致
 function diningStatsFor(date, ctx) {
-  const onleave = ctx.leaves.reduce((n, l) => n + (l.start_date <= date && (l.stop || '9999-12-31') >= date ? 1 : 0), 0);
+  const onSet = new Set();
+  for (const l of ctx.leaves) if (l.start_date <= date && (l.stop || '9999-12-31') >= date) onSet.add(l.student_id);
+  const onleave = onSet.size;
   const optout = ctx.optoutByDate.get(date) || 0;
   const daily = ctx.dailyByDate.get(date) || {};
   const plus = Number(daily.plus || 0), minus = Number(daily.minus || 0);
@@ -591,7 +594,8 @@ export default {
     }
     return env.ASSETS.fetch(request);
   },
-  // 定时兜底：即使当天没人打开工作台，也把该上报的就餐日期补上（每天 20:00 北京时间）
+  // 定时兜底：即使当天没人打开工作台，也把该上报的就餐日期补上
+  // 触发时间见 wrangler.toml：[triggers] crons = ["0 15 * * *"] → 每天 23:00 北京时间
   async scheduled(event, env, ctx) {
     try { await ensureDiningHistory(env); }
     catch (e) { console.error('dining auto-report failed:', e && (e.stack || e.message || e)); }
