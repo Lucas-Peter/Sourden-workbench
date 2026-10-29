@@ -86,17 +86,26 @@ async function patchStudent(env, id, b) {
   const cur = await first(env, 'SELECT * FROM students WHERE id=?', id);
   if (!cur) return false;
   const f = (k, d) => (b[k] !== undefined ? b[k] : d);
-  // 宿舍床位排重：若改了宿舍/床号且与他人冲突，拒绝（前端也会预检）
-  if (b.dorm !== undefined || b.bed !== undefined) {
-    const conflict = await conflictBed(env, f('dorm', cur.dorm), f('bed', cur.bed), id);
-    if (conflict) return { conflict: true, name: conflict.name };
+  // 换宿舍时床号的处理：
+  // - 明确指定了床号 → 照办，真撞车就 409 拒绝；
+  // - 没指定床号（只改宿舍）→ 优先沿用旧床号；旧床号在新宿舍已被占，
+  //   就退化成「只进宿舍、床号待排」，而不是整条请求失败（历史 bug）。
+  const dormChanged = b.dorm !== undefined && String(b.dorm) !== String(cur.dorm || '');
+  const nextDorm = f('dorm', cur.dorm);
+  let nextBed = b.bed !== undefined ? b.bed : cur.bed;
+  if (nextBed) {
+    const conflict = await conflictBed(env, nextDorm, nextBed, id);
+    if (conflict) {
+      if (b.bed === undefined && dormChanged) nextBed = '';
+      else return { conflict: true, name: conflict.name, bed: String(nextBed) };
+    }
   }
   await run(env,
     `UPDATE students SET name=?,gender=?,dorm=?,bed=?,parent_phone=?,major=?,notes=?,
        dorm_leader=?,xueji_registered=?,insurance_paid=?,xueji_note=?,insurance_note=? WHERE id=?`,
     String(f('name', cur.name)).trim() || cur.name,
     f('gender', cur.gender) === '女' ? '女' : '男',
-    String(f('dorm', cur.dorm)), String(f('bed', cur.bed)),
+    String(nextDorm), String(nextBed ?? ''),
     String(f('parent_phone', cur.parent_phone)), String(f('major', cur.major)),
     String(f('notes', cur.notes)),
     f('dorm_leader', cur.dorm_leader) ? 1 : 0,
@@ -109,6 +118,69 @@ async function patchStudent(env, id, b) {
     await run(env, 'UPDATE students SET dorm_leader=0 WHERE dorm=? AND id!=?', f('dorm', cur.dorm), id);
   }
   return true;
+}
+// 整间宿舍一次性调整：加入/移出/改床号/设宿舍长/在校状态，一个请求内算完最终状态再落库。
+// 关键点：先算出「提交后每个人在哪间宿舍哪个床」，再做唯一性校验，
+// 所以 A→B 换床、两人互换宿舍都不会被误判成「床号已被占用」。
+async function assignDorm(env, dorm, b) {
+  const target = String(dorm || '').trim();
+  if (!target) return { conflict: true, message: '缺少目标宿舍' };
+  const members = Array.isArray(b.members) ? b.members : [];
+  const removeIds = (Array.isArray(b.remove) ? b.remove : []).map(Number);
+  const students = await all(env, 'SELECT id,name,dorm,bed,dorm_leader FROM students');
+  const byId = new Map(students.map(s => [s.id, s]));
+
+  const finalDorm = new Map(), finalBed = new Map(), finalLeader = new Map();
+  for (const s of students) {
+    finalDorm.set(s.id, s.dorm || '');
+    finalBed.set(s.id, s.bed || '');
+    finalLeader.set(s.id, !!s.dorm_leader);
+  }
+  const touched = new Set();
+  for (const id of removeIds) {
+    if (!byId.has(id)) continue;
+    finalDorm.set(id, ''); finalBed.set(id, ''); finalLeader.set(id, false);
+    touched.add(id);
+  }
+  const leaderIds = [];
+  for (const mb of members) {
+    const id = Number(mb.id);
+    if (!byId.has(id)) continue;
+    finalDorm.set(id, target);
+    finalBed.set(id, String(mb.bed ?? '').trim());
+    finalLeader.set(id, !!mb.leader);
+    if (mb.leader) leaderIds.push(id);
+    touched.add(id);
+  }
+  // 唯一性校验：只看本次涉及的学生，避免历史重复数据把整次保存卡死
+  for (const id of touched) {
+    const d2 = finalDorm.get(id), bed = finalBed.get(id);
+    if (!d2 || !bed) continue;
+    for (const other of students) {
+      if (other.id === id) continue;
+      if (finalDorm.get(other.id) === d2 && finalBed.get(other.id) === bed) {
+        return { conflict: true, dorm: d2, bed, name: other.name, self: byId.get(id).name };
+      }
+    }
+  }
+  const stmts = [];
+  for (const id of touched) {
+    stmts.push(env.DB.prepare('UPDATE students SET dorm=?, bed=?, dorm_leader=? WHERE id=?')
+      .bind(finalDorm.get(id), finalBed.get(id), finalLeader.get(id) ? 1 : 0, id));
+  }
+  // 宿舍长唯一：本宿舍只保留最后一个被勾选的人
+  if (leaderIds.length) {
+    stmts.push(env.DB.prepare('UPDATE students SET dorm_leader=0 WHERE dorm=? AND id!=?')
+      .bind(target, leaderIds[leaderIds.length - 1]));
+  }
+  if (stmts.length) {
+    if (typeof env.DB.batch === 'function') await env.DB.batch(stmts);
+    else for (const s of stmts) await s.run();
+  }
+  if (b.date && b.present && typeof b.present === 'object') {
+    await saveDormCheck(env, { date: b.date, present: b.present });
+  }
+  return { ok: true };
 }
 async function deleteStudent(env, id) {
   const stu = await first(env, 'SELECT name FROM students WHERE id=?', id);
@@ -345,16 +417,22 @@ async function route(request, env) {
   if (seg[0] === 'students') {
     if (m === 'POST' && seg.length === 1) {
       const r = await addStudent(env, body);
-      if (r && r.conflict) return json({ error: 'bed_taken', name: r.name }, 409);
+      if (r && r.conflict) return json({ error: 'bed_taken', name: r.name, message: `床号已被 ${r.name} 占用` }, 409);
       return json({ ok: true, id: r.id }, 201);
     }
     const id = Number(seg[1]);
     if (m === 'PATCH') {
       const r = await patchStudent(env, id, body);
-      if (r && r.conflict) return json({ error: 'bed_taken', name: r.name }, 409);
+      if (r && r.conflict) return json({ error: 'bed_taken', name: r.name, bed: r.bed, message: `床号 ${r.bed || ''} 已被 ${r.name} 占用` }, 409);
       return json({ ok: !!r });
     }
     if (m === 'DELETE') return json({ ok: await deleteStudent(env, id) });
+  }
+  if (seg[0] === 'dorm-assign' && m === 'PUT') {
+    const r = await assignDorm(env, body.dorm, body);
+    if (r.conflict) return json({ error: 'bed_taken', name: r.name, bed: r.bed, dorm: r.dorm,
+      message: r.message || `${r.dorm || body.dorm} 的 ${r.bed} 号床已被 ${r.name} 占用` }, 409);
+    return json({ ok: true });
   }
   if (seg[0] === 'leaves') {
     if (m === 'POST' && seg.length === 1) return json({ ok: true, added: await addLeaves(env, body) }, 201);
