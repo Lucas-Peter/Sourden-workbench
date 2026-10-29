@@ -315,36 +315,58 @@ function rosterCheckModal(todoId){
 /* ============ 页面：请假学生 ============ */
 function pgLeaves(){
   const td = today();
-  const active = S.leaves.filter(l=>l.status==='请假中'&&l.start_date<=td&&(!l.end_date||l.end_date>=td));
-  const returnedToday = S.leaves.filter(l=>l.returned_at===td).length;
-  const startedToday = S.leaves.filter(l=>l.start_date===td).length;
-  const stale = S.leaves.filter(l=>l.status==='请假中'&&l.start_date<td);
-  const todays = S.leaves.filter(l=>l.start_date===td);
+  const rows = S.leaves.filter(l=>stuById(l.student_id));
+  const ongoing = rows.filter(l=>l.status==='请假中');
+  const byStart = (a,b) => a.start_date===b.start_date ? a.id-b.id : (a.start_date<b.start_date?-1:1);
+  // 三段互斥，保证任何「未销假」记录都一定能出现在页面上（含开始日期在未来的）
+  const active  = ongoing.filter(l=>l.start_date<=td && (!l.end_date || l.end_date>=td)).sort(byStart);
+  const upcoming= ongoing.filter(l=>l.start_date>td).sort(byStart);                              // 未来才生效
+  const overdue = ongoing.filter(l=>l.start_date<=td && l.end_date && l.end_date<td).sort(byStart); // 过了预计返校日仍未销假
+  const backToday = rows.filter(l=>l.returned_at===td).sort(byStart);
+  const startedToday = rows.filter(l=>l.start_date===td).length;
+  const onLeaveN = active.length + overdue.length;
   $('#main').innerHTML = `
-    <div class="page-head"><div class="page-title">📋 今日请假</div>
+    <div class="page-head"><div class="page-title">📋 请假管理<small>今天 ${md(td)} · 未销假 ${onLeaveN} 人${upcoming.length?` · 待生效 ${upcoming.length} 人`:''}</small></div>
       <div class="head-actions">
         <button class="btn" onclick="leaveStatsModal()">📊 请假统计</button>
         <button class="btn" onclick="leaveModal(true)">📋 批量登记</button>
         <button class="btn primary" onclick="leaveModal(false)">＋ 新增请假</button>
       </div></div>
     <div class="statbar">
-      <div class="st"><b>${active.length}</b><span>请假中</span></div>
-      <div class="st"><b>${returnedToday}</b><span>今日已返校</span></div>
-      <div class="st"><b>${startedToday}</b><span>今日合计</span></div>
+      <div class="st"><b>${onLeaveN}</b><span>请假中</span></div>
+      <div class="st"><b>${upcoming.length}</b><span>待生效</span></div>
+      <div class="st"><b>${backToday.length}</b><span>今日已返校</span></div>
+      <div class="st"><b>${startedToday}</b><span>今日登记</span></div>
     </div>
-    ${stale.length?`<div class="note-strip">往日请假未销假（${stale.length} 人，返校后请销假）</div>
-      <div class="card">${stale.map(l=>leaveCard(l,true)).join('')}</div>`:''}
-    ${todays.length?`<div class="card">${todays.map(l=>leaveCard(l,false)).join('')}</div>`:''}`;
+    ${active.length?`<div class="dorm-sec-title">🟠 请假中（${active.length} 人）</div>
+      <div class="card">${active.map(l=>leaveCard(l)).join('')}</div>`
+      :`<div class="card"><div class="empty">今天没有学生请假<br><span class="hint">点右上角「＋ 新增请假」登记；登记后按开始日期自动计入就餐人数</span></div></div>`}
+    ${upcoming.length?`<div class="dorm-sec-title">⏳ 待生效（${upcoming.length} 人）<span class="hint" style="font-weight:400;display:inline">开始日期在今天之后，到那天自动计入请假与就餐</span></div>
+      <div class="card">${upcoming.map(l=>leaveCard(l,{pending:true})).join('')}</div>`:''}
+    ${overdue.length?`<div class="note-strip">已过预计返校日仍未销假（${overdue.length} 人），学生返校后请点「销假返校」</div>
+      <div class="card">${overdue.map(l=>leaveCard(l,{overdue:true})).join('')}</div>`:''}
+    ${backToday.length?`<div class="dorm-sec-title">✅ 今日已返校（${backToday.length} 人）</div>
+      <div class="card">${backToday.map(l=>leaveCard(l)).join('')}</div>`:''}`;
 }
-function leaveCard(l, stale){
+function leaveCard(l, opt){
   const s = stuById(l.student_id); if(!s) return '';
-  return `<div class="todo-card" style="margin-bottom:8px">
-    <div class="t-head"><div class="t-title ${stale?'leave-name':''}">${esc(s.name)} <span class="${s.gender==='女'?'g-female':'g-male'}">${s.gender==='女'?'♀':'♂'}</span></div>
-      <span class="pill ${l.status==='请假中'?'mid':'ok'}">${l.status}</span></div>
-    <div class="t-meta"><span class="chip">📅 ${esc(l.start_date)} ~ ${l.end_date?esc(l.end_date):'未定'}</span></div>
+  const o = opt || {};
+  const pend = !!o.pending, over = !!o.overdue;
+  const tag = pend ? `<span class="pill info">待生效</span>`
+    : over ? `<span class="pill hi">逾期未销假</span>`
+    : l.status==='已返校' ? `<span class="pill ok">已返校</span>`
+    : `<span class="pill mid">请假中</span>`;
+  const dur = pend
+    ? `距开始 ${Math.max(0, dayDiff(today(), l.start_date))} 天`
+    : `已请 ${leaveDays(l)} 天`;
+  return `<div class="todo-card" style="margin-bottom:8px${over?';border-left-color:var(--red)':''}">
+    <div class="t-head"><div class="t-title ${over?'leave-name':''}">${esc(s.name)} <span class="${s.gender==='女'?'g-female':'g-male'}">${s.gender==='女'?'♀':'♂'}</span></div>
+      ${tag}</div>
+    <div class="t-meta"><span class="chip">📅 ${esc(l.start_date)} ~ ${l.end_date?esc(l.end_date):'未定'}</span>
+      <span class="chip">${dur}</span>${l.returned_at?`<span class="chip">返校 ${esc(l.returned_at)}</span>`:''}</div>
     ${l.reason?`<div class="t-notes">${esc(l.reason)}</div>`:''}
     <div class="t-acts">
-      ${l.status==='请假中'?`<button class="btn link green" onclick="leaveReturn(${l.id})">✔ 销假返校</button>`:''}
+      ${(!pend && l.status==='请假中')?`<button class="btn link green" onclick="leaveReturn(${l.id})">✔ 销假返校</button>`:''}
       <button class="btn link" onclick="leaveModal(false,${l.id})">✏ 编辑</button>
       <button class="btn link red" onclick="leaveDel(${l.id})">🗑 删除</button>
     </div></div>`;
@@ -831,7 +853,7 @@ function pgDining(){
         </div>
         <div class="field" style="display:flex;justify-content:space-between"><span>手动调整</span><b>${Number(daily.plus||0)-Number(daily.minus||0)}</b></div>
         <div class="field" style="display:flex;justify-content:space-between;background:#fef2f2;border-radius:8px;padding:8px 10px"><b>应就餐人数</b><b style="color:var(--red);font-size:18px">${final}</b></div>
-        <div class="hint" style="margin-top:8px">📌 不手动改也会自动上报：系统每天按「总人数 − 请假 − 不就餐 + 手动±」记一条；你手动改过的日期以你改的为准。</div>
+        <div class="hint" style="margin-top:8px">📌 不手动改也会自动上报：系统每天 <b>23:00</b> 按「总人数 − 请假 − 不就餐 + 手动±」记一条（之后再有请假/调整会更新到最新）；你手动改过的日期以你改的为准。</div>
       </div>
     </div>
     <div class="card">
