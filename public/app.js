@@ -116,7 +116,11 @@ async function api(path, method='GET', body) {
   const r = await fetch('/api'+path, opt);
   if (!r.ok) {
     let detail = '';
-    try { const j = await r.json(); if (j && j.error) detail = '（' + (j.name ? j.name + ' · ' : '') + j.error + '）'; } catch (e) {}
+    try {
+      const j = await r.json();
+      if (j && j.message) detail = '（' + j.message + '）';
+      else if (j && j.error) detail = '（' + (j.name ? j.name + ' · ' : '') + j.error + '）';
+    } catch (e) {}
     throw new Error('请求失败 ' + r.status + detail);
   }
   return r.json();
@@ -632,48 +636,111 @@ function pgDorms(){
 function dormAdjustModal(d){
   const td = today(), leaveSet = leaveIdsOn(td);
   const presentOf = s => { const c = S.dorm_checks.find(c=>c.student_id===s.id&&c.check_date===td); return c?!!c.present:!leaveSet.has(s.id); };
-  const mem = S.students.filter(s=>s.dorm===d).sort((a,b)=>(a.bed||'99').localeCompare(b.bed||'99','zh',{numeric:true}));
-  const others = stuSorted().filter(s=>s.dorm!==d);
+  const byBed = (a,b) => (a.bed||'99').localeCompare(b.bed||'99','zh',{numeric:true});
+  const mem = S.students.filter(s=>s.dorm===d).sort(byBed);
+  // 本地草稿：加入/移出/改床号/设宿舍长/在校状态都在这里改，点「保存」一次提交。
+  // （旧版是每改一项立刻发 PATCH，一旦撞床号 409 就整次中断，学生留在原宿舍。）
+  const rows = mem.map(s=>({ id:s.id, name:s.name, bed:String(s.bed||''), leader:!!s.dorm_leader, present:presentOf(s) }));
+  const removed = [];
+  const pickable = () => stuSorted().filter(s => s.dorm !== d || removed.includes(s.id));
+  const freeBed = () => {
+    const used = new Set(rows.map(r=>r.bed).filter(Boolean));
+    for (let i=1;i<=20;i++) if (!used.has(String(i))) return String(i);
+    return '';
+  };
   const m = openModal(`${modalHead('⚙ 调整宿舍 · '+d)}
     <div class="m-body">
-      <div class="hint">修改床号、设宿舍长、改在校状态，或从下方把学生加入本宿舍。</div>
-      <div id="da-members">${mem.map(s=>`
-        <div class="da-row" data-id="${s.id}">
-          <b>${esc(s.name)}</b>
-          <label>床号<input class="da-bed" value="${esc(s.bed||'')}" style="width:64px"></label>
-          <label class="check"><input type="checkbox" class="da-leader" ${s.dorm_leader?'checked':''}> 宿舍长</label>
-          <label class="check"><input type="checkbox" class="da-present" ${presentOf(s)?'checked':''}> 在校</label>
-          <button class="btn sm danger da-remove">移出</button>
-        </div>`).join('')||'<div class="empty">本宿舍暂无学生</div>'}</div>
+      <div class="hint">改床号、设宿舍长、勾在校状态；要加人或移出也在这里改，最后点【保存】一次性生效。</div>
+      <div id="da-members"></div>
       <div class="field" style="margin-top:12px"><label>加入学生到本宿舍</label>
-        <select id="da-add"><option value="">— 选择 —</option>${others.map(s=>`<option value="${s.id}">${esc(s.name)}（现 ${esc(s.dorm||'未分')}）</option>`).join('')}</select>
-        <div class="hint">加入后默认床号为空，可在上方改。</div></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="da-add" style="flex:1"></select>
+          <button class="btn sm primary" id="da-add-btn">＋ 加入</button>
+        </div>
+        <div class="hint">加入时会自动分配空闲床号，可在上面改成别的床号。</div></div>
+      <div id="da-removed" class="hint" style="color:#dc2626"></div>
     </div>
     <div class="m-foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="da-save">保存</button></div>`, true);
-  m.querySelector('#da-add').onchange = async (e) => {
-    const sid = Number(e.target.value); if (!sid) return;
-    await api('/students/'+sid,'PATCH',{dorm:d});
-    closeModal(); await refresh(); toast('已加入 '+d);
+
+  const paint = () => {
+    m.querySelector('#da-members').innerHTML = rows.map((r,i)=>`
+      <div class="da-row" data-i="${i}">
+        <b>${esc(r.name)}</b>
+        <label>床号<input class="da-bed" value="${esc(r.bed)}" style="width:64px"></label>
+        <label class="check"><input type="checkbox" class="da-leader" ${r.leader?'checked':''}> 宿舍长</label>
+        <label class="check"><input type="checkbox" class="da-present" ${r.present?'checked':''}> 在校</label>
+        <button class="btn sm danger da-remove">移出</button>
+      </div>`).join('') || '<div class="empty">本宿舍暂无学生</div>';
+    const sel = m.querySelector('#da-add');
+    const opts = pickable();
+    sel.innerHTML = '<option value="">— 选择学生 —</option>' +
+      opts.map(s=>`<option value="${s.id}">${esc(s.name)}（现 ${esc(s.dorm||'未分')}${s.bed?' · '+esc(s.bed)+' 床':''}）</option>`).join('');
+    m.querySelector('#da-add-btn').disabled = !opts.length;
+    m.querySelector('#da-removed').textContent = removed.length
+      ? '待移出（保存后变「未分宿舍」）：' + removed.map(id=>stuName(id)).join('、') : '';
   };
-  m.querySelectorAll('.da-remove').forEach(b=>b.onclick=async()=>{
-    const sid = Number(b.closest('.da-row').dataset.id);
-    await api('/students/'+sid,'PATCH',{dorm:''});
-    closeModal(); await refresh(); toast('已移出');
+
+  const box = m.querySelector('#da-members');
+  box.addEventListener('input', e => {
+    const row = e.target.closest('.da-row'); if (!row) return;
+    const r = rows[Number(row.dataset.i)];
+    if (e.target.classList.contains('da-bed')) r.bed = e.target.value.trim();
   });
-  m.querySelector('#da-save').onclick = async () => {
-    const presentMap = {};
-    for (const row of m.querySelectorAll('#da-members .da-row')) {
-      const sid = Number(row.dataset.id);
-      const bed = row.querySelector('.da-bed').value.trim();
-      const leader = row.querySelector('.da-leader').checked?1:0;
-      const present = row.querySelector('.da-present').checked?1:0;
-      presentMap[sid] = present;
-      if (bed) { const taken = S.students.find(x=>x.id!==sid && x.dorm===d && x.bed===bed); if (taken) { alert('床号 '+bed+' 已被 '+taken.name+' 占用'); return; } }
-      const cur = stuById(sid);
-      if (cur.bed!==bed || cur.dorm_leader!==leader) await api('/students/'+sid,'PATCH',{bed, dorm_leader:leader});
+  box.addEventListener('change', e => {
+    const row = e.target.closest('.da-row'); if (!row) return;
+    const i = Number(row.dataset.i), r = rows[i];
+    if (e.target.classList.contains('da-leader')) {
+      r.leader = e.target.checked;
+      if (r.leader) { // 一间宿舍只有一个宿舍长
+        rows.forEach((o,k)=>{ if (k!==i) o.leader = false; });
+        box.querySelectorAll('.da-leader').forEach((el,k)=>{ if (k!==i) el.checked = false; });
+      }
     }
-    await api('/dorm-check','PUT',{date:td, present:presentMap});
-    closeModal(); await refresh(); toast('已保存');
+    if (e.target.classList.contains('da-present')) r.present = e.target.checked;
+  });
+  box.addEventListener('click', e => {
+    if (!e.target.classList.contains('da-remove')) return;
+    const i = Number(e.target.closest('.da-row').dataset.i);
+    const [r] = rows.splice(i,1);
+    if (r && !removed.includes(r.id)) removed.push(r.id);
+    paint();
+  });
+  m.querySelector('#da-add-btn').onclick = () => {
+    const sid = Number(m.querySelector('#da-add').value);
+    if (!sid) return toast('请先在下拉框里选择学生');
+    const s = stuById(sid); if (!s) return;
+    const ri = removed.indexOf(sid); if (ri >= 0) removed.splice(ri, 1); // 撤销尚未提交的移出
+    rows.push({ id:s.id, name:s.name, bed:freeBed(), leader:false, present:!leaveSet.has(s.id) });
+    paint();
+    toast('已加入，记得点保存');
+  };
+  paint();
+
+  m.querySelector('#da-save').onclick = async () => {
+    // 前端预检：同宿舍床号不能重复
+    const seen = new Map();
+    for (const r of rows) {
+      if (!r.bed) continue;
+      if (seen.has(r.bed)) return alert(`床号 ${r.bed} 被 ${seen.get(r.bed)} 和 ${r.name} 同时占用，请改成不同的床号。`);
+      seen.set(r.bed, r.name);
+    }
+    const present = {};
+    for (const r of rows) present[r.id] = r.present ? 1 : 0;
+    const btn = m.querySelector('#da-save');
+    btn.disabled = true; btn.textContent = '保存中…';
+    try {
+      await api('/dorm-assign','PUT',{
+        dorm: d,
+        members: rows.map(r=>({ id:r.id, bed:r.bed, leader:r.leader ? 1 : 0 })),
+        remove: removed,
+        date: td,
+        present,
+      });
+    } catch (err) {
+      btn.disabled = false; btn.textContent = '保存';
+      return alert('保存失败：' + err.message + '\n（数据没有被改动，可以改完再试）');
+    }
+    closeModal(); await refresh(); toast('已保存 ' + d);
   };
 }
 function dormCheckModal(){
