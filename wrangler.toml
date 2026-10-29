@@ -16,3 +16,7 @@ database_id = "cd76c73a-b70b-4a58-af54-fb0c200a900b"
 # 打开日志便于排查
 [observability]
 enabled = true
+
+# 每天 20:00（北京时间）兜底跑一次就餐自动上报，没人打开工作台也不会漏天
+[triggers]
+crons = ["0 12 * * *"]

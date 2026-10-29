@@ -11,6 +11,14 @@ async function all(env, sql, ...args) { return (await env.DB.prepare(sql).bind(.
 async function run(env, sql, ...args) { return env.DB.prepare(sql).bind(...args).run(); }
 async function first(env, sql, ...args) { return env.DB.prepare(sql).bind(...args).first(); }
 
+// ---------- 日期（北京时间） ----------
+// Worker 跑在 UTC：北京时间 08:00 前 UTC 还停在前一天，所以统一 +8h 再取日期。
+function bjToday() { return new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); }
+function addDaysStr(d, n) {
+  const [y, m, dd] = String(d).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, dd + n)).toISOString().slice(0, 10);
+}
+
 async function getSetting(env, key, fallback) {
   const row = await first(env, 'SELECT value FROM settings WHERE key=?', key);
   return row ? JSON.parse(row.value) : fallback;
@@ -26,6 +34,10 @@ async function getState(env) {
   const cutoff = Date.now() - 3 * 86400000;
   await run(env, 'DELETE FROM todo_checks WHERE todo_id IN (SELECT id FROM todos WHERE done=1 AND done_at < ?)', cutoff);
   await run(env, 'DELETE FROM todos WHERE done=1 AND done_at < ?', cutoff);
+  // 就餐自动上报：没人手动调整的日子，也按当天最后的数据补一条记录
+  // 兜底包一层 try：自动上报出问题也不能让整个工作台打不开
+  try { await ensureDiningHistory(env); }
+  catch (e) { console.error('dining auto-report failed:', e && (e.stack || e.message || e)); }
   const [students, leaves, todos, todo_checks, dorm_checks, dining_optout, dining_daily,
     dining_history, dining_tables, dining_seats, violations, schedulesRows, settingsRows] = await Promise.all([
     all(env, 'SELECT * FROM students ORDER BY gender ASC, name ASC'),
@@ -321,7 +333,108 @@ async function clearDormCheck(env, b) {
 }
 
 // ---------- 就餐 ----------
+// dining_history.source：manual = 老师手动上报；auto = 系统按当天数据自动补报
+// 老库没有这一列时惰性补上（每个 Worker 实例只检查一次，无需手动跑 SQL）
+let diningSchemaReady = false;
+let diningHasSource = false;
+async function ensureDiningSchema(env) {
+  if (diningSchemaReady) return diningHasSource;
+  diningSchemaReady = true;
+  try {
+    const cols = await all(env, "SELECT name FROM pragma_table_info('dining_history')");
+    diningHasSource = Array.isArray(cols) && cols.some(c => c.name === 'source');
+    if (!diningHasSource) {
+      await run(env, "ALTER TABLE dining_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
+      diningHasSource = true;
+    }
+  } catch (e) {
+    // 加列失败（极少见）：退回不带 source 的老写法，功能不受影响，只是分不出自动/手动
+    try {
+      await run(env, "ALTER TABLE dining_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
+      diningHasSource = true;
+    } catch (e2) { diningHasSource = false; }
+  }
+  return diningHasSource;
+}
+
+// 写一行上报快照：同一日期只保留最后一次
+function historyUpsert(env, c, source) {
+  const base = 'INSERT INTO dining_history(date,total,onleave,optout,plus,minus,final,saved_at';
+  const upd = 'ON CONFLICT(date) DO UPDATE SET total=excluded.total, onleave=excluded.onleave, optout=excluded.optout, plus=excluded.plus, minus=excluded.minus, final=excluded.final, saved_at=excluded.saved_at';
+  const args = [c.date, c.total, c.onleave, c.optout, c.plus, c.minus, c.final, Date.now()];
+  if (diningHasSource) {
+    return env.DB.prepare(`${base},source) VALUES (?,?,?,?,?,?,?,?,?) ${upd}, source=excluded.source`)
+      .bind(...args, source);
+  }
+  return env.DB.prepare(`${base}) VALUES (?,?,?,?,?,?,?,?) ${upd}`).bind(...args);
+}
+
+// 一次性把算就餐人数要用的数据读进内存，避免按天循环查库
+async function diningContext(env) {
+  const [stuRow, leaves, optouts, dailies] = await Promise.all([
+    first(env, 'SELECT COUNT(*) AS n FROM students'),
+    all(env, 'SELECT start_date, end_date, returned_at FROM leaves'),
+    all(env, 'SELECT date, COUNT(*) AS n FROM dining_optout GROUP BY date'),
+    all(env, 'SELECT date, plus, minus FROM dining_daily'),
+  ]);
+  return {
+    total: (stuRow && stuRow.n) || 0,
+    // 请假按日期区间判断（含销假日），历史日期也能还原出当天真实人数
+    leaves: leaves.map(l => ({ start_date: l.start_date, stop: l.returned_at || l.end_date || '' })),
+    optoutByDate: new Map(optouts.map(r => [r.date, r.n])),
+    dailyByDate: new Map(dailies.map(r => [r.date, r])),
+  };
+}
+
+// 某就餐日的应吃人数 = 总人数 - 当天请假 - 不就餐 + 手动增 - 手动减
+function diningStatsFor(date, ctx) {
+  const onleave = ctx.leaves.reduce((n, l) => n + (l.start_date <= date && (l.stop || '9999-12-31') >= date ? 1 : 0), 0);
+  const optout = ctx.optoutByDate.get(date) || 0;
+  const daily = ctx.dailyByDate.get(date) || {};
+  const plus = Number(daily.plus || 0), minus = Number(daily.minus || 0);
+  return { date, total: ctx.total, onleave, optout, plus, minus,
+    final: Math.max(0, ctx.total - onleave - optout + plus - minus) };
+}
+
+// 自动上报：把「已经到日子但没有人报过」的就餐日按当天最后的数据补一条记录。
+// 手动报过的日期一律不动（以老师为准）；自动记录会在数据变化时更新为最新值。
+// 只回溯最近 7 天（够补上忘了打开工作台的几天），不去改写很久以前的历史。
+const DINING_AUTO_DAYS = 7;
+async function ensureDiningHistory(env) {
+  await ensureDiningSchema(env);
+  const [hist, ctx] = await Promise.all([
+    all(env, 'SELECT * FROM dining_history'),
+    diningContext(env),
+  ]);
+  const histByDate = new Map(hist.map(r => [r.date, r]));
+  const today = bjToday();
+  // 补报起点：最早有就餐数据的那天（历史记录 / 手动增减 / 不吃名单 / 请假），且最多回溯 7 天
+  const starts = [today, ...hist.map(r => r.date), ...ctx.dailyByDate.keys(),
+    ...ctx.optoutByDate.keys(), ...ctx.leaves.map(l => l.start_date)].filter(Boolean).sort();
+  const floor = addDaysStr(today, -(DINING_AUTO_DAYS - 1));
+  let from = starts[0] || today;
+  if (from < floor) from = floor;
+  if (from > today) from = today;   // 只有未来日期的记录时，也要保证今天被检查
+  const stmts = [];
+  for (let d = from; d <= today; d = addDaysStr(d, 1)) {
+    const old = histByDate.get(d);
+    if (old && old.source !== 'auto') continue;          // 老师手动报过 → 保持不动
+    const c = diningStatsFor(d, ctx);
+    if (old
+      && Number(old.final) === c.final && Number(old.total) === c.total
+      && Number(old.onleave) === c.onleave && Number(old.optout) === c.optout
+      && Number(old.plus) === c.plus && Number(old.minus) === c.minus) continue; // 没变化就不写库
+    stmts.push(historyUpsert(env, c, 'auto'));
+  }
+  if (stmts.length) {
+    if (typeof env.DB.batch === 'function') await env.DB.batch(stmts);
+    else for (const s of stmts) await s.run();
+  }
+  return stmts.length;
+}
+
 async function saveDining(env, b) {
+  await ensureDiningSchema(env);
   const date = b.date;
   if (Array.isArray(b.optout)) {
     await run(env, 'DELETE FROM dining_optout WHERE date=?', date);
@@ -329,16 +442,10 @@ async function saveDining(env, b) {
   }
   const plus = Number(b.plus || 0), minus = Number(b.minus || 0);
   await run(env, 'INSERT INTO dining_daily(date,plus,minus) VALUES (?,?,?) ON CONFLICT(date) DO UPDATE SET plus=excluded.plus, minus=excluded.minus', date, plus, minus);
-  // 写上报快照（上报记录弹窗用）
-  const total = (await all(env, 'SELECT COUNT(*) AS n FROM students'))[0].n;
-  const onleave = (await all(env, "SELECT COUNT(*) AS n FROM leaves WHERE status='请假中' AND start_date<=? AND (end_date IS NULL OR end_date>=?)", date, date))[0].n;
-  const optoutN = (await all(env, 'SELECT COUNT(*) AS n FROM dining_optout WHERE date=?', date))[0].n;
-  await run(env, `INSERT INTO dining_history(date,total,onleave,optout,plus,minus,final,saved_at)
-    VALUES (?,?,?,?,?,?,?,?)
-    ON CONFLICT(date) DO UPDATE SET total=excluded.total, onleave=excluded.onleave, optout=excluded.optout,
-      plus=excluded.plus, minus=excluded.minus, final=excluded.final, saved_at=excluded.saved_at`,
-    date, total, onleave, optoutN, plus, minus,
-    Math.max(0, total - onleave - optoutN + plus - minus), Date.now());
+  // 老师手动上报：写 manual 快照（同一日期只保留最后一次）
+  const c = diningStatsFor(date, await diningContext(env));
+  const stmt = historyUpsert(env, c, 'manual');
+  await stmt.run();
   return true;
 }
 
@@ -452,7 +559,7 @@ async function route(request, env) {
     if (m === 'PUT') return json({ ok: await saveDormCheck(env, body) });
     if (m === 'DELETE') return json({ ok: await clearDormCheck(env, body) });
   }
-  if (seg[0] === 'dining' && m === 'PUT') return json({ ok: await saveDining(env, body) });
+  if (seg[0] === 'dining' && m === 'PUT') { await ensureDiningSchema(env); return json({ ok: await saveDining(env, body) }); }
   if (seg[0] === 'tables') {
     if (m === 'POST' && seg.length === 1) return json({ ok: await addTable(env, body) }, 201);
     const id = Number(seg[1]);
@@ -483,5 +590,10 @@ export default {
       catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
     }
     return env.ASSETS.fetch(request);
+  },
+  // 定时兜底：即使当天没人打开工作台，也把该上报的就餐日期补上（每天 20:00 北京时间）
+  async scheduled(event, env, ctx) {
+    try { await ensureDiningHistory(env); }
+    catch (e) { console.error('dining auto-report failed:', e && (e.stack || e.message || e)); }
   },
 };
