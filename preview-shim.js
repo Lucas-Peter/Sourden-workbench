@@ -421,12 +421,18 @@
         return { status: 200, data: { ok: true } };
       }
       if (method === 'PUT' && seg[2] === 'checks') {
-        const map = body.checks || {};
-        for (const [sid, val] of Object.entries(map)) {
-          const ex = store.todo_checks.find(x => x.todo_id === id && x.student_id === Number(sid));
-          if (ex) ex.checked = val ? 1 : 0; else store.todo_checks.push({ id: nid(store.todo_checks), todo_id: id, student_id: Number(sid), checked: val ? 1 : 0 });
+        const cur = store.todos.find(x => x.id === id);
+        if (!cur) return { status: 404, data: { ok: false, error: 'todo_not_found', message: '这条待办已被删除，请刷新页面' } };
+        // 两种入参都支持：{checked:[id...]} / {checks:{id:0|1}}
+        const ids = Array.isArray(body.checked)
+          ? [...new Set(body.checked.map(Number).filter(n => Number.isFinite(n) && n > 0))]
+          : [...new Set(Object.entries(body.checks || {}).filter(([, v]) => v && v !== '0').map(([k]) => Number(k)))];
+        // 与后端一致：整体重建，不留下重复行
+        store.todo_checks = store.todo_checks.filter(x => x.todo_id !== id);
+        for (const s of store.students) {
+          store.todo_checks.push({ id: nid(store.todo_checks), todo_id: id, student_id: s.id, checked: ids.includes(s.id) ? 1 : 0 });
         }
-        save(); return { status: 200, data: { ok: true } };
+        save(); return { status: 200, data: { ok: true, checked: ids.length } };
       }
     }
 

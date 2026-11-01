@@ -46,6 +46,19 @@ wb-yhbthz7mnbnfa8.sourden.com
 - **数据库**：`dining_history` 新增 `source`（manual/auto）、`manual_final`（被覆盖的手动人数）两列。Worker 第一次请求会自动 `ALTER TABLE` 补上，**不需要手动执行 SQL**；想手动加就执行 `dining-auto-console.sql`。
 - **注意**：新增的 cron 触发器需要重新部署一次才生效（GitHub 提交后 Cloudflare 自动构建即可）。
 
+## 8. 写库性能约定（重要，改代码前先看）
+Cloudflare D1 免费版限制：**一次 Worker 请求最多执行 50 条查询**（`db.batch()` 整体只算 1 条）。
+所以凡是「一次操作要写全班数据」的地方，都必须用批量写法，不能逐人 `await run()`：
+
+| 场景 | 做法 | 查询条数（47 人） |
+|---|---|---|
+| 逐人核对（待办） | `DELETE` + `INSERT ... SELECT FROM students` + 一条 `IN (...)` 更新 | 3 |
+| 宿舍人数核对 | 一条 `DELETE ... IN` + 多行 `VALUES` 插入（每句 ≤33 行） | 2 |
+| 不吃名单 / 桌位成员 | `db.batch([...])` | 1 |
+
+历史教训：2026-11-01 之前逐人核对是「每人 SELECT + UPDATE」，47 人 = 94 条查询 → 超限后请求中途失败，
+表现为「点保存没反应 / 只存进去一部分人」，而且前端没有 catch，连报错都看不到。
+
 ## 更新代码
 改完文件后在 GitHub 重新上传/提交，Cloudflare 自动重新构建（**数据在 D1，不会因更新代码丢失**）。
 

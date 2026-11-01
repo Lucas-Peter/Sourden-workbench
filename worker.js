@@ -263,9 +263,10 @@ async function addTodo(env, b) {
     b.link_roster ? 1 : 0,
     String(b.notes || ''), Date.now());
   if (r.meta.changes > 0 && b.link_roster) {
-    const id = (await first(env, 'SELECT last_insert_rowid() AS id')).id;
-    const students = await all(env, 'SELECT id FROM students');
-    for (const s of students) await run(env, 'INSERT INTO todo_checks(todo_id,student_id,checked) VALUES (?,?,0)', id, s.id);
+    // meta.last_row_id 由 D1 直接返回，省掉一次 last_insert_rowid 查询；
+    // 名单用 INSERT ... SELECT 一条写完（43 人只需 1 条 SQL，不再逐人 INSERT）
+    const id = (r.meta && r.meta.last_row_id) || (await first(env, 'SELECT last_insert_rowid() AS id')).id;
+    await run(env, 'INSERT INTO todo_checks(todo_id,student_id,checked) SELECT ?, id, 0 FROM students', id);
   }
   return true;
 }
@@ -294,10 +295,11 @@ async function patchTodo(env, id, b) {
       ['高', '中', '低'].includes(b.priority) ? b.priority : cur.priority,
       b.link_roster !== undefined ? (b.link_roster ? 1 : 0) : cur.link_roster,
       String(b.notes ?? cur.notes), id);
-    // 若新开启关联花名册，补齐勾选行
+    // 若新开启关联花名册，补齐勾选行（一条 SQL 搞定，且不会产生重复行）
     if (b.link_roster === 1 && !cur.link_roster) {
-      const students = await all(env, 'SELECT id FROM students');
-      for (const s of students) await run(env, 'INSERT INTO todo_checks(todo_id,student_id,checked) VALUES (?,?,0)', id, s.id);
+      await run(env, `INSERT INTO todo_checks(todo_id,student_id,checked)
+        SELECT ?, id, 0 FROM students
+        WHERE id NOT IN (SELECT student_id FROM todo_checks WHERE todo_id=?)`, id, id);
     }
   }
   return true;
@@ -307,25 +309,73 @@ async function deleteTodo(env, id) {
   const r = await run(env, 'DELETE FROM todos WHERE id=?', id);
   return r.meta.changes > 0;
 }
-async function saveTodoChecks(env, todoId, b) {
-  const map = b.checks || {};
-  for (const [sid, val] of Object.entries(map)) {
-    const exist = await first(env, 'SELECT id FROM todo_checks WHERE todo_id=? AND student_id=?', todoId, sid);
-    if (exist) await run(env, 'UPDATE todo_checks SET checked=? WHERE id=?', val ? 1 : 0, exist.id);
-    else await run(env, 'INSERT INTO todo_checks(todo_id,student_id,checked) VALUES (?,?,?)', todoId, sid, val ? 1 : 0);
-  }
-  return true;
+// ---------- 批量写库小工具 ----------
+// Cloudflare D1 限制「单次 Worker 调用最多 50 条查询」（免费版），一条 batch 只算 1 条。
+// 早期实现是「逐人 SELECT + UPDATE」，43 人 = 86 条查询 → 直接超限报错，
+// 表现就是「点保存没反应/只保存了一部分」。统一改成 batch 整批写。
+async function execBatch(env, stmts) {
+  if (!stmts || !stmts.length) return;
+  if (typeof env.DB.batch === 'function') return env.DB.batch(stmts);
+  for (const s of stmts) await s.run();   // 本地预览/测试环境的兜底
+}
+// 把 id 数组切成每块 90 个（SQLite 单条语句最多 100 个绑定参数）
+function chunkIds(ids, size = 90) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+function toIdList(raw) {
+  return [...new Set((Array.isArray(raw) ? raw : [])
+    .map(Number).filter(n => Number.isFinite(n) && n > 0))];
 }
 
+// 逐人核对保存：整体重建该待办的勾选行
+// 入参两种都支持：{checked:[学生id...]}（新，体积小）/ {checks:{id:0|1}}（旧格式，兼容）
+function saveTodoChecks(env, todoId, b) {
+  const ids = Array.isArray(b.checked) ? toIdList(b.checked)
+    : toIdList(Object.entries(b.checks || {}).filter(([, v]) => v && v !== '0').map(([k]) => k));
+  const stmts = [
+    env.DB.prepare('DELETE FROM todo_checks WHERE todo_id=?').bind(todoId),
+    // 以花名册为准重建：全班先记 0，查重与「新增学生」都自动跟上
+    env.DB.prepare('INSERT INTO todo_checks(todo_id,student_id,checked) SELECT ?, id, 0 FROM students').bind(todoId),
+  ];
+  for (const part of chunkIds(ids)) {
+    stmts.push(env.DB.prepare(
+      `UPDATE todo_checks SET checked=1 WHERE todo_id=? AND student_id IN (${part.map(() => '?').join(',')})`
+    ).bind(todoId, ...part));
+  }
+  return execBatch(env, stmts).then(() => ids.length);
+}
+
+
 // ---------- 宿舍核对 ----------
+// 注意语义：只更新「本次提交里出现的学生」，未提及的人不落行
+// （页面读不到行时按「在校」处理，所以不能按全班重建，否则全班会被标成不在校）。
+// 写法改成批量：1 条删除 + 若干条多行插入，47 人只需 3 条 SQL。
 async function saveDormCheck(env, b) {
   const date = b.date, map = b.present || {};
-  for (const [sid, val] of Object.entries(map)) {
-    const exist = await first(env, 'SELECT id FROM dorm_checks WHERE student_id=? AND check_date=?', sid, date);
-    if (exist) await run(env, 'UPDATE dorm_checks SET present=? WHERE id=?', val ? 1 : 0, exist.id);
-    else await run(env, 'INSERT INTO dorm_checks(student_id,check_date,present) VALUES (?,?,?)', sid, date, val ? 1 : 0);
+  const pairs = Object.entries(map)
+    .map(([k, v]) => [Number(k), v ? 1 : 0])
+    .filter(([id]) => Number.isFinite(id) && id > 0);
+  if (!pairs.length) return 0;
+  const stmts = [];
+  for (const part of chunkIds(pairs.map(p => p[0]))) {
+    stmts.push(env.DB.prepare(
+      `DELETE FROM dorm_checks WHERE check_date=? AND student_id IN (${part.map(() => '?').join(',')})`
+    ).bind(date, ...part));
   }
-  return true;
+  // 每行 3 个绑定参数 → 每句最多 33 行（101 会超 100 上限）
+  for (let i = 0; i < pairs.length; i += 33) {
+    const part = pairs.slice(i, i + 33);
+    const values = part.map(() => '(?,?,?)').join(',');
+    const args = [];
+    for (const [sid, present] of part) args.push(sid, date, present);
+    stmts.push(env.DB.prepare(
+      `INSERT INTO dorm_checks(student_id,check_date,present) VALUES ${values}`
+    ).bind(...args));
+  }
+  await execBatch(env, stmts);
+  return pairs.filter(p => p[1]).length;
 }
 async function clearDormCheck(env, b) {
   const r = await run(env, 'DELETE FROM dorm_checks WHERE check_date=?', b.date);
@@ -465,8 +515,12 @@ async function saveDining(env, b) {
   await ensureDiningSchema(env);
   const date = b.date;
   if (Array.isArray(b.optout)) {
-    await run(env, 'DELETE FROM dining_optout WHERE date=?', date);
-    for (const sid of b.optout) await run(env, 'INSERT INTO dining_optout(date,student_id) VALUES (?,?)', date, sid);
+    // 不吃名单最多可到全班人数，逐条 INSERT 会顶到 D1 单次查询上限 → 改 batch
+    const stmts = [env.DB.prepare('DELETE FROM dining_optout WHERE date=?').bind(date)];
+    for (const sid of toIdList(b.optout)) {
+      stmts.push(env.DB.prepare('INSERT INTO dining_optout(date,student_id) VALUES (?,?)').bind(date, sid));
+    }
+    await execBatch(env, stmts);
   }
   const plus = Number(b.plus || 0), minus = Number(b.minus || 0);
   await run(env, 'INSERT INTO dining_daily(date,plus,minus) VALUES (?,?,?) ON CONFLICT(date) DO UPDATE SET plus=excluded.plus, minus=excluded.minus', date, plus, minus);
@@ -494,10 +548,11 @@ async function deleteTable(env, id) {
   return r.meta.changes > 0;
 }
 async function saveTableMembers(env, id, b) {
-  const members = Array.isArray(b.members) ? b.members : [];
-  await run(env, 'DELETE FROM dining_seats WHERE table_id=?', id);
-  let pos = 0;
-  for (const sid of members) await run(env, 'INSERT INTO dining_seats(table_id,student_id,position) VALUES (?,?,?)', id, sid, pos++);
+  const members = toIdList(b.members);
+  const stmts = [env.DB.prepare('DELETE FROM dining_seats WHERE table_id=?').bind(id)];
+  members.forEach((sid, pos) => stmts.push(
+    env.DB.prepare('INSERT INTO dining_seats(table_id,student_id,position) VALUES (?,?,?)').bind(id, sid, pos)));
+  await execBatch(env, stmts);
   return true;
 }
 
@@ -581,7 +636,12 @@ async function route(request, env) {
     const id = Number(seg[1]);
     if (m === 'PATCH' && seg.length === 2) return json({ ok: await patchTodo(env, id, body) });
     if (m === 'DELETE') return json({ ok: await deleteTodo(env, id) });
-    if (m === 'PUT' && seg[2] === 'checks') return json({ ok: await saveTodoChecks(env, id, body) });
+    if (m === 'PUT' && seg[2] === 'checks') {
+      const t = await first(env, 'SELECT id FROM todos WHERE id=?', id);
+      if (!t) return json({ ok: false, error: 'todo_not_found', message: '这条待办已被删除，请刷新页面' }, 404);
+      const n = await saveTodoChecks(env, id, body);
+      return json({ ok: true, checked: n });
+    }
   }
   if (seg[0] === 'dorm-check') {
     if (m === 'PUT') return json({ ok: await saveDormCheck(env, body) });
