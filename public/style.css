@@ -152,6 +152,8 @@ table.tbl tr:hover td{background:#fafbfc}
 .person-pill.on{background:#dcfce7;border-color:#86efac;color:var(--green);font-weight:600}
 .person-pill.off{background:#fee2e2;border-color:#fca5a5;color:var(--red)}
 .person-pill.leave{background:#fee2e2;border-color:#fca5a5;color:var(--red);text-decoration:line-through}
+.rc-err{color:var(--red);font-size:13px;margin-top:10px}
+.rc-err:empty{display:none}
 
 /* 弹窗 */
 .modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:flex-start;justify-content:center;z-index:100;overflow:auto;padding:40px 14px}

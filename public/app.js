@@ -300,20 +300,41 @@ function todoModal(id){
 }
 function rosterCheckModal(todoId){
   const t = S.todos.find(x=>x.id===todoId);
+  if (!t) return toast('这条待办已不存在，请刷新页面');
   const checked = new Set(S.todo_checks.filter(c=>c.todo_id===todoId&&c.checked).map(c=>c.student_id));
+  const rows = stuSorted();
   const m = openModal(`${modalHead('👥 逐人核对 · '+esc(t.title))}
     <div class="m-body">
-      <div class="hint">点名字切换「已办」，实时统计进度。</div>
-      <div class="person-pills" id="rc-pills">${stuSorted().map(s=>
+      <div class="hint">点名字切换「已办」；<b id="rc-count">${checked.size}</b>/${rows.length} 人已办。改完点「保存」，保存成功会提示人数。</div>
+      <div class="person-pills" id="rc-pills">${rows.map(s=>
         `<span class="person-pill ${checked.has(s.id)?'on':''}" data-id="${s.id}">${esc(s.name)}</span>`).join('')}</div>
+      <div class="rc-err" id="rc-err"></div>
     </div>
-    <div class="m-foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="rc-save">保存</button></div>`, true);
-  m.querySelectorAll('#rc-pills .person-pill').forEach(p => p.onclick = () => p.classList.toggle('on'));
-  m.querySelector('#rc-save').onclick = async () => {
-    const checks = {};
-    m.querySelectorAll('#rc-pills .person-pill').forEach(p => checks[p.dataset.id] = p.classList.contains('on')?1:0);
-    await api('/todos/'+todoId+'/checks','PUT',{checks});
-    closeModal(); await refresh(); toast('已保存');
+    <div class="m-foot">
+      <button class="btn" id="rc-all">全部已办</button>
+      <button class="btn" id="rc-none">全部清空</button>
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="rc-save">保存</button>
+    </div>`, true);
+  const pills = [...m.querySelectorAll('#rc-pills .person-pill')];
+  const recount = () => { const n = pills.filter(p=>p.classList.contains('on')).length; m.querySelector('#rc-count').textContent = n; return n; };
+  pills.forEach(p => p.onclick = () => { p.classList.toggle('on'); recount(); });
+  m.querySelector('#rc-all').onclick  = () => { pills.forEach(p=>p.classList.add('on')); recount(); };
+  m.querySelector('#rc-none').onclick = () => { pills.forEach(p=>p.classList.remove('on')); recount(); };
+  const btn = m.querySelector('#rc-save'), errBox = m.querySelector('#rc-err');
+  btn.onclick = async () => {
+    const ids = pills.filter(p=>p.classList.contains('on')).map(p=>Number(p.dataset.id));
+    btn.disabled = true; const old = btn.textContent; btn.textContent = '保存中…'; errBox.textContent = '';
+    try {
+      const r = await api('/todos/'+todoId+'/checks','PUT',{checked:ids});
+      // 本地先行更新，避免 /state 慢一拍时看起来没生效
+      S.todo_checks = S.todo_checks.filter(c=>c.todo_id!==todoId);
+      rows.forEach(s => S.todo_checks.push({ todo_id:todoId, student_id:s.id, checked: ids.includes(s.id)?1:0 }));
+      closeModal(); await refresh(); toast('已保存 · '+((r&&r.checked!=null)?r.checked:ids.length)+'/'+rows.length+' 人已办');
+    } catch (e) {
+      btn.disabled = false; btn.textContent = old;
+      errBox.textContent = '⚠ 保存失败：' + (e && e.message ? e.message : e) + '，请再点一次保存';
+    }
   };
 }
 
@@ -818,9 +839,15 @@ function dormCheckModal(){
   m.querySelectorAll('.person-pill').forEach(p=>p.onclick=()=>{ state[p.dataset.id]=!state[p.dataset.id]; updatePills(); });
   m.querySelector('#dc-all').onclick = ()=>{ for(const k in state) state[k]=true; updatePills(); };
   m.querySelector('#dc-reset').onclick = ()=>{ for(const s of S.students) state[s.id]=!leaveSet.has(s.id); updatePills(); };
-  m.querySelector('#dc-save').onclick = async ()=>{
-    await api('/dorm-check','PUT',{date:td, present:state});
-    closeModal(); await refresh(); toast('核对已保存');
+  m.querySelector('#dc-save').onclick = async (e)=>{
+    const btn = e.currentTarget; btn.disabled = true; btn.textContent = '保存中…';
+    try {
+      await api('/dorm-check','PUT',{date:td, present:state});
+      closeModal(); await refresh(); toast('核对已保存');
+    } catch (err) {
+      btn.disabled = false; btn.textContent = '保存核对';
+      alert('保存失败：' + (err && err.message ? err.message : err) + '\n请再点一次「保存核对」');
+    }
   };
 }
 
