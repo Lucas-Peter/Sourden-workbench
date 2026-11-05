@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#f97316" />
+<title>今日待办 · 小卡片</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<link rel="icon" href="/icon-192.png" />
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:#f4f5f7;color:#1f2937;
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  .hd{background:linear-gradient(100deg,#fb923c,#f97316);color:#fff;padding:10px 14px;display:flex;align-items:center;gap:8px}
+  .hd b{font-size:15px;font-weight:700}
+  .hd .r{margin-left:auto;font-size:12px;opacity:.92;display:flex;align-items:center;gap:8px}
+  .hd button{border:none;background:rgba(255,255,255,.2);color:#fff;border-radius:8px;padding:3px 8px;font-size:12px;cursor:pointer}
+  .hd button:hover{background:rgba(255,255,255,.32)}
+  .list{flex:1;overflow:auto;padding:10px 12px 4px}
+  .row{background:#fff;border:1px solid #e8ecf1;border-radius:10px;padding:9px 10px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start}
+  .row.over{border-left:3px solid #dc2626}
+  .row.today{border-left:3px solid #f97316}
+  .row .body{flex:1;min-width:0;cursor:pointer}
+  .row .t{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .m{margin-top:3px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:#8a94a6}
+  .tag{border-radius:999px;padding:0 6px;line-height:17px;background:#f1f5f9;color:#5f6470}
+  .tag.hot{background:#fff1e6;color:#ea580c}
+  .tag.red{background:#fee2e2;color:#dc2626}
+  .ck{flex:none;width:24px;height:24px;border-radius:7px;border:1px solid #e8ecf1;background:#fff;color:#16a34a;
+    font-size:13px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .ck:hover{border-color:#86efac;background:#f0fdf4}
+  .ft{border-top:1px solid #e8ecf1;background:#fff;padding:8px 12px;font-size:11.5px;color:#8a94a6;
+    display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .ft a{color:#ea580c;text-decoration:none}
+  .empty{padding:28px 10px;text-align:center;color:#8a94a6;font-size:13px}
+  .grow{animation:none}
+  @media (prefers-color-scheme: dark){
+    body{background:#111418;color:#e5e7eb}
+    .row{background:#1b1f24;border-color:#2a2f36}
+    .row .m{color:#9aa3b2}
+    .tag{background:#252b32;color:#9aa3b2}
+    .ft{background:#1b1f24;border-color:#2a2f36}
+    .ck{background:#1b1f24;border-color:#2a2f36}
+  }
+</style>
+</head>
+<body>
+<div class="hd">
+  <b>今日待办</b>
+  <span id="dt" style="font-size:12px;opacity:.92"></span>
+  <div class="r"><span id="open"></span><button id="btn-refresh" title="刷新">刷新</button><button id="btn-app" title="打开完整工作台">展开</button></div>
+</div>
+<div class="list" id="list"><div class="empty">加载中…</div></div>
+<div class="ft"><span id="stat"></span><span id="ts"></span></div>
+<script>
+(function(){
+  'use strict';
+  var state = null;
+  var pad = function(n){ return String(n).padStart(2,'0'); };
+  var bj = function(ts){ var d = new Date((ts||Date.now()) + 8*3600000); return d.toISOString(); };
+  var bjDate = function(ts){ return bj(ts).slice(0,10); };
+  var today = function(){ return bjDate(Date.now()); };
+  var hhmm = function(v){ return /^\d{2}:\d{2}/.test(String(v||'')) ? String(v).slice(0,5) : ''; };
+  var esc = function(v){ return String(v==null?'':v).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); };
+  var WEEK = '日一二三四五六';
+  var weekday = function(ds){ var p = ds.split('-').map(Number); return '周' + WEEK[new Date(Date.UTC(p[0], p[1]-1, p[2])).getUTCDay()]; };
+  var remindTxt = function(t){
+    var n = Number(t.remind_before==null?30:t.remind_before);
+    if (n>=1440) return '提前'+Math.round(n/1440)+'天';
+    if (n>=60) return '提前'+Math.floor(n/60)+'小时';
+    return '提前'+n+'分';
+  };
+  var leaveToday = function(){
+    if (!state || !state.leaves) return 0;
+    var td = today(), set = new Set();
+    state.leaves.forEach(function(l){
+      if (l.status !== '请假中') return;
+      var stop = l.returned_at || l.end_date || '9999-12-31';
+      if (l.start_date <= td && stop >= td) set.add(l.student_id);
+    });
+    return set.size;
+  };
+  var render = function(){
+    var list = document.getElementById('list');
+    if (!state) { list.innerHTML = '<div class="empty">加载中…</div>'; return; }
+    var td = today();
+    var todos = (state.todos || []).filter(function(t){ return !t.done; });
+    var over = todos.filter(function(t){ return t.due_date && t.due_date < td; })
+      .sort(function(a,b){ return a.due_date < b.due_date ? -1 : 1; });
+    var tdList = todos.filter(function(t){ return t.due_date === td; })
+      .sort(function(a,b){ return (hhmm(a.due_time)||'99:99').localeCompare(hhmm(b.due_time)||'99:99'); });
+    var later = todos.filter(function(t){ return !t.due_date || t.due_date > td; })
+      .sort(function(a,b){
+        if (!a.due_date) return 1; if (!b.due_date) return -1;
+        return a.due_date < b.due_date ? -1 : 1;
+      });
+    var ordered = over.concat(tdList, later);
+    document.getElementById('dt').textContent = td.slice(5) + ' ' + weekday(td);
+    document.getElementById('open').textContent = todos.length ? ('未完成 ' + todos.length) : '';
+    if (!ordered.length) {
+      list.innerHTML = '<div class="empty">今天没有待办<br><span style="font-size:12px">点右上角「展开」添加</span></div>';
+    } else {
+      list.innerHTML = ordered.map(function(t){
+        var cls = (t.due_date && t.due_date < td) ? 'over' : (t.due_date === td ? 'today' : '');
+        var when = t.due_date
+          ? (t.due_date === td ? '今天' : (t.due_date < td ? '逾期 ' + t.due_date.slice(5) : t.due_date.slice(5))) + (hhmm(t.due_time) ? ' ' + hhmm(t.due_time) : '')
+          : '无期限';
+        var tags = '<span class="tag">' + esc(when) + '</span>';
+        if (t.due_date && Number(t.remind_on) !== 0) tags += '<span class="tag hot">' + esc(remindTxt(t)) + '</span>';
+        if (t.link_roster) {
+          var n = (state.todo_checks||[]).filter(function(c){ return c.todo_id === t.id && c.checked; }).length;
+          tags += '<span class="tag">已办 ' + n + '/' + (state.students||[]).length + '</span>';
+        }
+        return '<div class="row ' + cls + '">'
+          + '<div class="body" data-open="1"><div class="t">' + esc(t.title) + '</div><div class="m">' + tags + '</div></div>'
+          + '<button class="ck" data-done="' + t.id + '" title="标记完成">✓</button>'
+          + '</div>';
+      }).join('');
+    }
+    var doneToday = (state.todos||[]).filter(function(t){
+      return t.done && t.done_at && bjDate(t.done_at) === td;
+    }).length;
+    document.getElementById('stat').textContent = '今日已办 ' + doneToday + ' 项 · 请假 ' + leaveToday() + ' 人';
+    document.getElementById('ts').textContent = '更新 ' + bj(Date.now()).slice(11,16);
+  };
+  var load = function(){
+    fetch('/api/state', { cache: 'no-store' })
+      .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(d){ state = d; render(); })
+      .catch(function(e){
+        document.getElementById('list').innerHTML = '<div class="empty">连不上服务器<br><span style="font-size:12px">' + esc(e.message) + '</span></div>';
+      });
+  };
+  document.getElementById('list').addEventListener('click', function(ev){
+    var d = ev.target.closest('[data-done]');
+    if (d) {
+      var id = Number(d.getAttribute('data-done'));
+      d.disabled = true;
+      fetch('/api/todos/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'done' }) })
+        .then(function(){ load(); })
+        .catch(function(){ d.disabled = false; });
+      return;
+    }
+    if (ev.target.closest('[data-open]')) window.open('/', '_blank');
+  });
+  document.getElementById('btn-refresh').onclick = load;
+  document.getElementById('btn-app').onclick = function(){ window.open('/', '_blank'); };
+  load();
+  setInterval(load, 30000);
+  document.addEventListener('visibilitychange', function(){ if (!document.hidden) load(); });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(function(){});
+})();
+</script>
+</body>
+</html>

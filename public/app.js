@@ -11,6 +11,26 @@ const PERIODS = ['上午1','上午2','上午3','上午4','下午1','下午2','�
 const DAYS = ['周一','周二','周三','周四','周五'];
 const LAYOUT_PRESETS = [[2,3,2],[2,4,2],[3,4],[2,2,2,2],[3,3,2],[2,3,3]];
 const VIO_TYPES = ['沉迷手机','课堂违规','其他违规'];
+// 待办提醒的提前量选项（before 单位：分钟；on=0 表示关闭）
+const REMIND_OPTS = [
+  {on:1,before:15,label:'提前 15 分钟'},{on:1,before:30,label:'提前 30 分钟'},
+  {on:1,before:60,label:'提前 1 小时'},{on:1,before:120,label:'提前 2 小时'},
+  {on:1,before:1440,label:'提前 1 天'},{on:0,before:30,label:'关闭提醒'},
+];
+const remindLabel = (m) => {
+  const n = Number(m==null?30:m);
+  if (n>=1440) return '提前'+Math.round(n/1440)+'天';
+  if (n>=60) return '提前'+(n%60?Math.floor(n/60)+'小时半':Math.floor(n/60)+'小时');
+  return '提前'+n+'分';
+};
+const remindSel = (t) => {
+  const on = Number(t && t.remind_on)==0 ? 0 : 1;
+  const before = Number(t && t.remind_before!=null ? t.remind_before : 30);
+  const v = on+'-'+before;
+  const opts = REMIND_OPTS.slice();
+  if (!opts.some(o=>o.on+'-'+o.before===v)) opts.unshift({on,before,label:`提前 ${before} 分钟`});
+  return opts.map(o=>`<option value="${o.on}-${o.before}" ${o.on+'-'+o.before===v?'selected':''}>${o.label}</option>`).join('');
+};
 
 // 真实默认课表（2026-10-14 提供）：26电商综合班 班级课程表 + 杜栋玲 个人课程表
 const DEFAULT_CLASS_SCHED = {
@@ -95,6 +115,10 @@ function dayDiff(a, b){
   return Math.round((Date.UTC(y2,m2-1,d2) - Date.UTC(y1,m1-1,d1)) / 86400000);
 }
 const WEEK_CN = '日一二三四五六';
+// 时刻：'14:00' → '14:00'；不合法返回 ''
+const hhmm = v => (/^\d{2}:\d{2}/.test(String(v ?? '')) ? String(v).slice(0,5) : '');
+// 「日期 + 时刻」→ 北京时间时间戳（页面里算提醒点用）
+function bjTime(dateStr, timeStr){ return new Date(dateStr+'T'+(hhmm(timeStr)||'08:00')+':00+08:00').getTime(); }
 function weekdayCN(ds){
   const [y,m,d] = ds.split('-').map(Number);
   return '周' + WEEK_CN[new Date(Date.UTC(y, m-1, d)).getUTCDay()];
@@ -252,12 +276,17 @@ function todoCard(t){
   const checks = t.link_roster ? S.todo_checks.filter(c=>c.todo_id===t.id) : [];
   const doneN = checks.filter(c=>c.checked).length;
   const clearIn = (t.done && t.done_at) ? Math.max(0, Math.ceil((t.done_at + 3*86400000 - Date.now())/86400000)) : 0;
+  const when = t.due_date ? `${esc(t.due_date)}${t.due_time?' '+esc(t.due_time):''}` : '无期限';
+  const remind = !t.due_date ? '' : (Number(t.remind_on)===0
+    ? '<span class="chip">🔕 不提醒</span>'
+    : `<span class="chip" style="color:var(--brand-deep)">⏰ ${remindLabel(t.remind_before)}</span>`);
   return `<div class="todo-card ${t.done?'done':''}">
     <div class="t-head"><div class="t-title">${esc(t.title)}</div>
       <span class="pill ${t.priority==='高'?'hi':t.priority==='中'?'mid':'lo'}">${t.priority==='高'?'高优先':t.priority}</span></div>
     <div class="t-meta">
       <span class="chip">${cat.ico} ${esc(t.category)}</span>
-      <span class="chip">📅 ${t.due_date?esc(t.due_date):'无期限'}</span>
+      <span class="chip">📅 ${when}</span>
+      ${remind}
       ${t.done?`<span class="chip">🗑 ${clearIn}天后清除</span>`:''}
       ${t.link_roster?`<span class="progress-chip" onclick="rosterCheckModal(${t.id})">👥 ${doneN}/${S.students.length} 已办</span>`:''}
     </div>
@@ -274,12 +303,16 @@ function todoCard(t){
 async function todoAct(id, action){ await api('/todos/'+id,'PATCH',{action}); await refresh(); }
 async function todoDel(id){ if(!confirm('确认删除该待办？'))return; await api('/todos/'+id,'DELETE'); await refresh(); }
 function todoModal(id){
-  const t = id ? S.todos.find(x=>x.id===id) : {title:'',category:'宿舍',due_date:today(),priority:'高',link_roster:0,notes:''};
+  const t = id ? S.todos.find(x=>x.id===id) : {title:'',category:'宿舍',due_date:today(),due_time:'',priority:'高',link_roster:0,notes:'',remind_before:30,remind_on:1};
   const m = openModal(`${modalHead(id?'✏ 编辑待办':'📝 新增待办')}
     <div class="m-body">
       <div class="field"><label>事项</label><input id="f-title" placeholder="如：核对今晚宿舍人数" value="${esc(t.title)}"></div>
       <div class="field"><label>分类</label><select id="f-cat">${Object.keys(CATS).map(c=>`<option ${c===t.category?'selected':''}>${c}</option>`).join('')}</select></div>
       <div class="field"><label>截止日期（留空 = 无期限）</label><input id="f-date" type="date" value="${t.due_date||''}"></div>
+      <div class="field"><label>截止时间（可留空）</label><input id="f-time" type="time" value="${hhmm(t.due_time)}">
+        <div class="hint">填了时间才能按时提醒；留空则当天 08:00 按「今天要做」提醒一次。</div></div>
+      <div class="field"><label>提醒</label><select id="f-remind">${remindSel(t)}</select>
+        <div class="hint">提醒发到微信（PushPlus），没配置的话点顶部「🔔 提醒」设置。</div></div>
       <div class="field"><label>优先级</label><select id="f-pri">${['高','中','低'].map(p=>`<option ${p===t.priority?'selected':''}>${p}</option>`).join('')}</select></div>
       <div class="field"><label>关联花名册</label>
         <button class="btn" id="f-link">${t.link_roster?'✓ 已开启（统计名单）':'关闭（不统计名单）'}</button>
@@ -291,9 +324,12 @@ function todoModal(id){
   const lb = m.querySelector('#f-link');
   lb.onclick = () => { link = !link; lb.textContent = link?'✓ 已开启（统计名单）':'关闭（不统计名单）'; };
   m.querySelector('#f-save').onclick = async () => {
+    const rv = String(m.querySelector('#f-remind').value||'1-30').split('-');
     const body = { title:m.querySelector('#f-title').value, category:m.querySelector('#f-cat').value,
-      due_date:m.querySelector('#f-date').value||null, priority:m.querySelector('#f-pri').value,
-      link_roster:link?1:0, notes:m.querySelector('#f-notes').value };
+      due_date:m.querySelector('#f-date').value||null, due_time:m.querySelector('#f-time').value||null,
+      priority:m.querySelector('#f-pri').value,
+      link_roster:link?1:0, notes:m.querySelector('#f-notes').value,
+      remind_on:Number(rv[0]), remind_before:Number(rv[1]) };
     if (id) await api('/todos/'+id,'PATCH',body); else await api('/todos','POST',body);
     closeModal(); await refresh(); toast('已保存');
   };
@@ -336,6 +372,109 @@ function rosterCheckModal(todoId){
       errBox.textContent = '⚠ 保存失败：' + (e && e.message ? e.message : e) + '，请再点一次保存';
     }
   };
+}
+
+/* ============ 提醒设置 & 桌面卡片 ============ */
+function notifyCfg(){
+  const n = S.settings.notify || {};
+  return { token: n.pushplus_token || '', daily: Number(n.daily_summary)===0?0:1,
+    overdue: Number(n.overdue_daily)===0?0:1, at: n.daily_at || '08:00' };
+}
+const permText = () => (typeof Notification === 'undefined') ? '当前浏览器不支持桌面通知'
+  : Notification.permission==='granted' ? '✓ 已允许（页面开着时会弹系统通知）'
+  : Notification.permission==='denied' ? '已被拒绝，需在浏览器站点设置里手动允许'
+  : '未开启（只会有页面内提示音和标题闪烁）';
+function remindSettingsModal(){
+  const c = notifyCfg();
+  const m = openModal(`${modalHead('🔔 提醒设置')}
+    <div class="m-body">
+      <div class="hint" style="line-height:1.75">提醒由 <b>PushPlus</b> 推到微信，关掉电脑、关掉浏览器也能收到。<br>
+        ① 打开 <b>pushplus.plus</b> → 微信扫码登录 → 复制「一对一推送」的 token（32 位）；<br>
+        ② 粘贴到下面点保存；③ 微信会弹一条消息，点进去关注公众号即可。</div>
+      <div class="field" style="margin-top:12px"><label>PushPlus token</label>
+        <input id="n-token" placeholder="粘贴 32 位 token" value="${esc(c.token)}"></div>
+      <div class="field"><label>每日汇总（每天 ${esc(c.at)}）</label>
+        <label class="check"><input type="checkbox" id="n-daily" ${c.daily?'checked':''}> 推今日待办 + 逾期未完成 + 请假/就餐人数</label></div>
+      <div class="field"><label>逾期催办</label>
+        <label class="check"><input type="checkbox" id="n-overdue" ${c.overdue?'checked':''}> 逾期没完成的，每天跟着汇总催一次</label></div>
+      <div class="field"><label>浏览器通知（页面开着时）</label>
+        <button class="btn" id="n-perm">申请桌面通知权限</button>
+        <div class="hint" id="n-perm-state">${permText()}</div></div>
+      <div class="field"><label>桌面卡片</label>
+        <button class="btn" id="n-widget">📌 打开待办小卡片</button>
+        <div class="hint">打开后点地址栏右侧的「安装」（Edge/Chrome），就能固定到任务栏或桌面，像一个小组件。</div></div>
+      <div class="rc-err" id="n-err"></div>
+    </div>
+    <div class="m-foot">
+      <button class="btn" id="n-test">发送测试</button>
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="n-save">保存</button>
+    </div>`, true);
+  const err = m.querySelector('#n-err');
+  const collect = () => ({
+    pushplus_token: m.querySelector('#n-token').value.trim(),
+    daily_summary: m.querySelector('#n-daily').checked ? 1 : 0,
+    overdue_daily: m.querySelector('#n-overdue').checked ? 1 : 0,
+    daily_at: c.at,
+  });
+  m.querySelector('#n-perm').onclick = async () => {
+    if (typeof Notification === 'undefined') return toast('当前浏览器不支持桌面通知');
+    try { await Notification.requestPermission(); } catch (e) {}
+    m.querySelector('#n-perm-state').textContent = permText();
+  };
+  m.querySelector('#n-widget').onclick = () => {
+    window.open('/widget', 'todoWidget', 'width=380,height=560,menubar=no,toolbar=no,location=no');
+  };
+  m.querySelector('#n-save').onclick = async () => {
+    const cfg = collect();
+    try {
+      await api('/settings','PUT',{ notify: cfg });
+      S.settings.notify = cfg;
+      closeModal(); toast(cfg.pushplus_token ? '已保存，提醒已开启' : '已保存（还没填 token，暂不会推送）');
+    } catch (e) { err.textContent = '⚠ 保存失败：' + (e.message || e); }
+  };
+  m.querySelector('#n-test').onclick = async () => {
+    const btn = m.querySelector('#n-test'), old = btn.textContent;
+    const cfg = collect();
+    btn.disabled = true; btn.textContent = '发送中…'; err.textContent = '';
+    try {
+      // 先把当前填的 token 存下来，避免「填了没保存就测试」的困惑
+      await api('/settings','PUT',{ notify: cfg }); S.settings.notify = cfg;
+      const r = await api('/notify/test','POST',{ token: cfg.pushplus_token });
+      toast(r && r.ok ? '测试消息已发出，看看微信' : ('发送失败：' + ((r && r.message) || '未知原因')));
+    } catch (e) {
+      err.textContent = '⚠ ' + (e.message || e);
+    } finally { btn.disabled = false; btn.textContent = old; }
+  };
+}
+
+/* 页面开着时的本地提醒：提示音 + 系统通知 + 标题闪烁（PushPlus 之外的兜底） */
+const localFired = new Set();
+function flashTitle(msg){
+  const orig = document.title; let n = 0;
+  const h = setInterval(() => {
+    document.title = n % 2 ? orig : msg;
+    if (++n > 6) { clearInterval(h); document.title = orig; }
+  }, 900);
+}
+function localRemindTick(){
+  if (!S || !S.todos) return;
+  const now = Date.now();
+  for (const t of S.todos) {
+    if (t.done || !t.due_date || Number(t.remind_on) === 0) continue;
+    const due = bjTime(t.due_date, t.due_time);
+    const before = Math.max(0, Number(t.remind_before == null ? 30 : t.remind_before) || 0);
+    if (now < due - before*60000 || now > due + 6*60000) continue;
+    const key = t.id + '|' + today();
+    if (localFired.has(key)) continue;
+    localFired.add(key);
+    const body = (hhmm(t.due_time) || '08:00') + ' 截止';
+    toast('⏰ ' + t.title + '（' + body + '）');
+    flashTitle('⏰ ' + t.title);
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      try { new Notification('待办提醒：' + t.title, { body, tag: 'todo-' + t.id }); } catch (e) {}
+    }
+  }
 }
 
 /* ============ 页面：请假学生 ============ */
@@ -1351,7 +1490,9 @@ function schedCopy(kind){
 }
 
 /* ---------- 顶栏动作 ---------- */
-$('#btn-export').onclick = async () => {
+// 顶栏按钮做存在性判断：某个页面上缺按钮时不能让整个 app.js 挂掉
+const btnExport = $('#btn-export');
+if (btnExport) btnExport.onclick = async () => {
   const data = await api('/export');
   const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a = document.createElement('a');
@@ -1365,12 +1506,16 @@ $('#tb-teacher').onclick = async () => {
   await api('/settings','PUT',{teacher_name:v});
   await refresh();
 };
+const btnRemind = $('#btn-remind');
+if (btnRemind) btnRemind.onclick = remindSettingsModal;
 
 /* ---------- 启动 ---------- */
 (async function init(){
   try {
     S = await api('/state');
     renderTop(); renderNav(); render();
+    localRemindTick();
+    setInterval(localRemindTick, 60000);
   } catch (e) {
     $('#main').innerHTML = `<div class="card"><b>加载失败：</b>${esc(e.message)}<br><span class="hint">请确认已部署 Worker 并绑定 D1 数据库（见 DEPLOY.md）。</span></div>`;
   }
