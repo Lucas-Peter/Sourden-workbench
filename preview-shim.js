@@ -114,8 +114,8 @@
       students,
       leaves,
       todos: [
-        { id: 1, title: '核对今晚宿舍人数', category: '宿舍', due_date: T, priority: '高', link_roster: 0, notes: '重点核对请假学生宿舍', done: 0, done_at: null, created_at: 1, postpone_count: 0 },
-        { id: 2, title: '催办未缴学平险', category: '保险', due_date: null, priority: '中', link_roster: 1, notes: '', done: 0, done_at: null, created_at: 2, postpone_count: 0 },
+        { id: 1, title: '核对今晚宿舍人数', category: '宿舍', due_date: T, due_time: '20:30', priority: '高', link_roster: 0, notes: '重点核对请假学生宿舍', remind_before: 15, remind_on: 1, done: 0, done_at: null, created_at: 1, postpone_count: 0 },
+        { id: 2, title: '催办未缴学平险', category: '保险', due_date: null, due_time: null, priority: '中', link_roster: 1, notes: '', remind_before: 30, remind_on: 1, done: 0, done_at: null, created_at: 2, postpone_count: 0 },
         { id: 3, title: '已完成：更新班级黑板报', category: '其他', due_date: T, priority: '低', link_roster: 0, notes: '', done: 1, done_at: now, created_at: 3, postpone_count: 0 },
       ],
       todo_checks: students.map(s => ({ id: s.id, todo_id: 2, student_id: s.id, checked: s.id % 2 })),
@@ -384,8 +384,11 @@
       if (method === 'POST' && seg.length === 1) {
         const t = { id: nid(store.todos), title: String(body.title || '').trim() || '（无标题）',
           category: String(body.category || '其他'), due_date: body.due_date || null,
+          due_time: /^\d{2}:\d{2}/.test(String(body.due_time || '')) ? String(body.due_time).slice(0, 5) : null,
           priority: ['高', '中', '低'].includes(body.priority) ? body.priority : '中',
           link_roster: body.link_roster ? 1 : 0, notes: String(body.notes || ''),
+          remind_before: body.remind_before === undefined ? 30 : Number(body.remind_before) || 0,
+          remind_on: Number(body.remind_on) === 0 ? 0 : 1,
           created_at: now, done: 0, done_at: null, postpone_count: 0 };
         store.todos.push(t);
         if (t.link_roster) for (const s of store.students) store.todo_checks.push({ id: nid(store.todo_checks), todo_id: t.id, student_id: s.id, checked: 0 });
@@ -408,6 +411,11 @@
           cur.title = String(body.title ?? cur.title).trim() || cur.title;
           cur.category = String(body.category ?? cur.category);
           cur.due_date = body.due_date !== undefined ? (body.due_date || null) : cur.due_date;
+          cur.due_time = body.due_time !== undefined
+            ? (/^\d{2}:\d{2}/.test(String(body.due_time || '')) ? String(body.due_time).slice(0, 5) : null)
+            : (cur.due_time || null);
+          if (body.remind_before !== undefined) cur.remind_before = Number(body.remind_before) || 0;
+          if (body.remind_on !== undefined) cur.remind_on = Number(body.remind_on) === 0 ? 0 : 1;
           cur.priority = ['高', '中', '低'].includes(body.priority) ? body.priority : cur.priority;
           cur.link_roster = body.link_roster !== undefined ? (body.link_roster ? 1 : 0) : cur.link_roster;
           cur.notes = String(body.notes ?? cur.notes);
@@ -492,6 +500,14 @@
       const kind = seg[1] === 'personal' ? 'personal' : 'class';
       store.schedules = store.schedules || {}; store.schedules[kind] = body.data || {}; save();
       return { status: 200, data: { ok: true } };
+    }
+
+    if (seg[0] === 'notify' && seg[1] === 'test' && method === 'POST') {
+      // 预览模式不真的发微信，只校验有没有填 token
+      const tk = String((body && body.token) || '').trim();
+      return tk
+        ? { status: 200, data: { ok: true, message: '预览模式：不会真的发微信，线上才发' } }
+        : { status: 400, data: { ok: false, error: 'no_token', message: '还没填 PushPlus token' } };
     }
 
     if (seg[0] === 'settings' && method === 'PUT') {

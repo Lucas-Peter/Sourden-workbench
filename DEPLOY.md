@@ -9,8 +9,9 @@ Cloudflare 后台 → **D1** → Create database → 名称填 `sourden-workbenc
 
 ## 2. 上传代码
 在 GitHub 新建一个仓库（如 `workbench`），把这几个文件/文件夹传上去（注意 `public` 是文件夹，先建文件夹再传里面的文件）：
-`worker.js` / `wrangler.toml` / `schema.sql` / `public/index.html` / `public/style.css` / `public/app.js`
-（可选：`dining-auto-console.sql` 只是迁移说明；`public/preview.html` 是本地预览页，建议不要传线上；`_wb-build-preview.mjs` 是本地构建脚本，不需要上传。）
+`worker.js` / `wrangler.toml` / `schema.sql` / `public/index.html` / `public/style.css` / `public/app.js` /
+`public/widget.html` / `public/manifest.webmanifest` / `public/sw.js` / `public/icon-192.png` / `public/icon-512.png` / `public/apple-touch-icon.png`
+（可选：`dining-auto-console.sql` 只是迁移说明；`public/preview.html` 是本地预览页，建议不要传线上；`_wb-build-preview.mjs`、`_wb-make-icons.mjs` 是本地脚本，不需要上传。）
 
 ## 3. 连接 Cloudflare
 Cloudflare 后台 → **Workers & Pages** → Create → 选「连接 GitHub 仓库」→ 选 `workbench` 仓库。
@@ -58,6 +59,38 @@ Cloudflare D1 免费版限制：**一次 Worker 请求最多执行 50 条查询*
 
 历史教训：2026-11-01 之前逐人核对是「每人 SELECT + UPDATE」，47 人 = 94 条查询 → 超限后请求中途失败，
 表现为「点保存没反应 / 只存进去一部分人」，而且前端没有 catch，连报错都看不到。
+
+## 9. 待办提醒（PushPlus 推微信）与桌面卡片（2026-11-05 起）
+### 9.1 怎么开启（一次性，3 分钟）
+1. 手机/电脑打开 **pushplus.plus** → 微信扫码登录 → 在首页「一对一推送」里复制 **token**（32 位）。
+2. 打开工作台 → 右上角 **🔔 提醒** → 粘贴 token → **保存** → 点 **发送测试**。
+3. 微信会收到一条消息，点进去关注公众号即可（之后所有提醒都走这里）。
+
+### 9.2 提醒规则
+| 提醒 | 触发时间 | 说明 |
+|---|---|---|
+| 快要到点 | 截止时间 − 提前量（默认 30 分钟） | 每条待办可单独设 15 分 / 30 分 / 1 小时 / 2 小时 / 1 天，或关闭 |
+| 每日汇总 | 每天 08:00 后第一次定时任务 | 今日待办 + 逾期未完成 + 今日请假人数 + 明日就餐人数 |
+| 逾期催办 | 跟着每日汇总 | 过了截止日期还没勾完成的，每天催一次（可在 🔔 提醒 里关掉） |
+
+- 实现：`wrangler.toml` 增加 `*/5 * * * *` 定时任务，每 5 分钟扫一遍；`todo_reminders` 表用唯一索引
+  `(todo_id, kind, fire_date)` 去重，**同一件事一天只推一次**，推送失败不记账（下一轮会重试）。
+- 待办时间留空时按当天 08:00 计算，等于「早上提醒我今天有这件事」。
+- 页面开着时还有一层本地兜底：浏览器通知 + 提示音 + 标题闪烁（需在 🔔 提醒 里点「申请桌面通知权限」）。
+
+### 9.3 桌面卡片（PWA 小窗）
+1. 工作台 → 🔔 提醒 → **打开待办小卡片**（或直接访问 `你的域名/widget`）。
+2. 在打开的小窗里点地址栏右侧 **安装**（Edge/Chrome），勾选「固定到任务栏」；桌面会多一个图标。
+3. 开机自启：`Win + R` → 输入 `shell:startup` → 把那个快捷方式拖进去。
+4. 想让它一直压在其它窗口上面：装微软官方 **PowerToys**，选中小窗按 `Win + Ctrl + T`。
+
+卡片特性：340×470 独立窗口、30 秒自动刷新、点 ✓ 直接标记完成、显示请假人数、适配深色模式。
+相关文件：`public/widget.html`、`public/manifest.webmanifest`、`public/sw.js`、`public/icon-192/512.png`
+（图标由 `node _wb-make-icons.mjs` 生成，改配色后重跑即可）。
+
+### 9.4 数据库
+`todos` 增加 `due_time` / `remind_before` / `remind_on`，新增 `todo_reminders` 表。Worker 首次请求会自动
+`ALTER TABLE`，**不需要手动跑 SQL**；校验见 `schema.sql`。
 
 ## 更新代码
 改完文件后在 GitHub 重新上传/提交，Cloudflare 自动重新构建（**数据在 D1，不会因更新代码丢失**）。

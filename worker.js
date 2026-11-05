@@ -30,6 +30,7 @@ async function setSetting(env, key, value) {
 
 // ---------- 全量状态 ----------
 async function getState(env) {
+  await ensureTodoSchema(env);
   // 已完成超过 3 天的待办真正删除（含级联逐人勾选），仅保留近 3 天
   const cutoff = Date.now() - 3 * 86400000;
   await run(env, 'DELETE FROM todo_checks WHERE todo_id IN (SELECT id FROM todos WHERE done=1 AND done_at < ?)', cutoff);
@@ -253,15 +254,20 @@ async function deleteLeave(env, id) {
 
 // ---------- 待办 ----------
 async function addTodo(env, b) {
+  await ensureTodoSchema(env);
   const r = await run(env,
-    `INSERT INTO todos(title,category,due_date,priority,link_roster,notes,created_at)
-     VALUES (?,?,?,?,?,?,?)`,
+    `INSERT INTO todos(title,category,due_date,due_time,priority,link_roster,notes,remind_before,remind_on,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
     String(b.title || '').trim() || '（无标题）',
     String(b.category || '其他'),
     b.due_date || null,
+    normTime(b.due_time),
     ['高', '中', '低'].includes(b.priority) ? b.priority : '中',
     b.link_roster ? 1 : 0,
-    String(b.notes || ''), Date.now());
+    String(b.notes || ''),
+    normBefore(b.remind_before, 30),
+    normOn(b.remind_on, 1),
+    Date.now());
   if (r.meta.changes > 0 && b.link_roster) {
     // meta.last_row_id 由 D1 直接返回，省掉一次 last_insert_rowid 查询；
     // 名单用 INSERT ... SELECT 一条写完（43 人只需 1 条 SQL，不再逐人 INSERT）
@@ -271,6 +277,7 @@ async function addTodo(env, b) {
   return true;
 }
 async function patchTodo(env, id, b) {
+  await ensureTodoSchema(env);
   const cur = await first(env, 'SELECT * FROM todos WHERE id=?', id);
   if (!cur) return false;
   if (b.action === 'done') {
@@ -288,13 +295,17 @@ async function patchTodo(env, id, b) {
     }
     await run(env, 'UPDATE todos SET due_date=?, postpone_count=postpone_count+1 WHERE id=?', next, id);
   } else {
-    await run(env, 'UPDATE todos SET title=?,category=?,due_date=?,priority=?,link_roster=?,notes=? WHERE id=?',
+    await run(env, `UPDATE todos SET title=?,category=?,due_date=?,due_time=?,priority=?,link_roster=?,notes=?,remind_before=?,remind_on=? WHERE id=?`,
       String(b.title ?? cur.title).trim() || cur.title,
       String(b.category ?? cur.category),
       b.due_date !== undefined ? (b.due_date || null) : cur.due_date,
+      b.due_time !== undefined ? normTime(b.due_time) : cur.due_time,
       ['高', '中', '低'].includes(b.priority) ? b.priority : cur.priority,
       b.link_roster !== undefined ? (b.link_roster ? 1 : 0) : cur.link_roster,
-      String(b.notes ?? cur.notes), id);
+      String(b.notes ?? cur.notes),
+      normBefore(b.remind_before, Number(cur.remind_before == null ? 30 : cur.remind_before)),
+      normOn(b.remind_on, Number(cur.remind_on == null ? 1 : cur.remind_on)),
+      id);
     // 若新开启关联花名册，补齐勾选行（一条 SQL 搞定，且不会产生重复行）
     if (b.link_roster === 1 && !cur.link_roster) {
       await run(env, `INSERT INTO todo_checks(todo_id,student_id,checked)
@@ -306,6 +317,7 @@ async function patchTodo(env, id, b) {
 }
 async function deleteTodo(env, id) {
   await run(env, 'DELETE FROM todo_checks WHERE todo_id=?', id);
+  try { await run(env, 'DELETE FROM todo_reminders WHERE todo_id=?', id); } catch (e) {}
   const r = await run(env, 'DELETE FROM todos WHERE id=?', id);
   return r.meta.changes > 0;
 }
@@ -347,6 +359,159 @@ function saveTodoChecks(env, todoId, b) {
   return execBatch(env, stmts).then(() => ids.length);
 }
 
+
+// ---------- 待办提醒 ----------
+// todos 增加三列：due_time(HH:mm) / remind_before(提前多少分钟) / remind_on(是否提醒)
+// todo_reminders 记录「哪条待办、哪种提醒、哪一天」已经发过，配合 5 分钟一轮的定时任务去重。
+let todoSchemaReady = false;
+async function ensureTodoSchema(env) {
+  if (todoSchemaReady) return;
+  todoSchemaReady = true;
+  const soft = async (sql) => { try { await run(env, sql); } catch (e) { /* 列已存在 / 并发加列，忽略 */ } };
+  let cols = [];
+  try { cols = await all(env, "SELECT name FROM pragma_table_info('todos')"); } catch (e) { cols = []; }
+  const has = (n) => Array.isArray(cols) && cols.some((c) => c.name === n);
+  if (!has('due_time')) await soft('ALTER TABLE todos ADD COLUMN due_time TEXT');
+  if (!has('remind_before')) await soft('ALTER TABLE todos ADD COLUMN remind_before INTEGER NOT NULL DEFAULT 30');
+  if (!has('remind_on')) await soft('ALTER TABLE todos ADD COLUMN remind_on INTEGER NOT NULL DEFAULT 1');
+  await soft(`CREATE TABLE IF NOT EXISTS todo_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    fire_date TEXT NOT NULL,
+    sent_at INTEGER NOT NULL
+  )`);
+  await soft('CREATE UNIQUE INDEX IF NOT EXISTS idx_reminder_uniq ON todo_reminders(todo_id, kind, fire_date)');
+}
+
+// 推送渠道（当前接 PushPlus，微信收）：token 存在 settings 表的 notify 键里
+const NOTIFY_DEFAULT = { pushplus_token: '', daily_summary: 1, daily_at: '08:00', overdue_daily: 1 };
+async function getNotify(env) {
+  const v = await getSetting(env, 'notify', {});
+  return Object.assign({}, NOTIFY_DEFAULT, v && typeof v === 'object' ? v : {});
+}
+const htmlEsc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hhmmOf = (v) => (/^\d{1,2}:\d{2}/.test(String(v || '')) ? String(v).slice(0, 5).padStart(5, '0') : '');
+// 北京时间（Worker 跑 UTC，+8h 再取日期/时刻）
+function bjHM(ts) {
+  const iso = new Date((ts == null ? Date.now() : ts) + 8 * 3600000).toISOString();
+  return { date: iso.slice(0, 10), time: iso.slice(11, 16) };
+}
+// 「日期 + 时刻」→ 时间戳；没填时刻按当天 08:00
+function bjTimestamp(dateStr, timeStr) {
+  const t = hhmmOf(timeStr) || '08:00';
+  const ts = Date.parse(dateStr + 'T' + t + ':00+08:00');
+  return Number.isFinite(ts) ? ts : Date.parse(dateStr + 'T08:00:00+08:00');
+}
+async function sendPushplus(env, title, html, tokenOverride) {
+  const cfg = await getNotify(env);
+  const token = String(tokenOverride || cfg.pushplus_token || '').trim();
+  if (!token) return { ok: false, error: 'no_token', message: '还没填 PushPlus token' };
+  try {
+    const res = await fetch('https://www.pushplus.plus/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token, title: String(title).slice(0, 100), content: html, template: 'html' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const ok = res.ok && Number(data.code) === 200;
+    return { ok, code: data.code, message: data.msg || (ok ? '' : '发送失败 ' + res.status) };
+  } catch (e) {
+    return { ok: false, error: 'network', message: '推送请求失败：' + ((e && e.message) || e) };
+  }
+}
+
+// 定时任务主体（每 5 分钟）：
+//  ① 即将到期：now ≥ 截止时间 − 提前量，且还没过期太久 → 一条「快要到点了」
+//  ② 每天 daily_at（默认 08:00）后第一次：一条汇总（今日待办 + 逾期未完成 + 请假/就餐人数）
+async function runTodoReminders(env) {
+  const cfg = await getNotify(env);
+  if (!String(cfg.pushplus_token || '').trim()) return 0;      // 没配通道就不打扰，也不动库
+  await ensureTodoSchema(env);
+  const now = Date.now();
+  const { date: today, time: nowHM } = bjHM(now);
+  const todos = await all(env, 'SELECT * FROM todos WHERE done=0');
+  await run(env, 'DELETE FROM todo_reminders WHERE fire_date < ?', addDaysStr(today, -7));
+  const sentRows = await all(env, 'SELECT todo_id, kind FROM todo_reminders WHERE fire_date=?', today);
+  const sent = new Set(sentRows.map((r) => r.todo_id + '|' + r.kind));
+  const mark = [];
+  let sentN = 0;
+
+  // ① 快要到点
+  const soon = [];
+  for (const t of todos) {
+    if (!t.due_date || Number(t.remind_on) === 0) continue;
+    const dueTs = bjTimestamp(t.due_date, t.due_time);
+    const beforeMin = Math.max(0, Math.min(1440, Number(t.remind_before == null ? 30 : t.remind_before) || 0));
+    const fireTs = dueTs - beforeMin * 60000;
+    if (now < fireTs || now > dueTs + 6 * 60000) continue;     // 没到点 / 早已过期（交给汇总）
+    if (sent.has(t.id + '|before')) continue;
+    soon.push({ t, dueTs });
+  }
+  if (soon.length) {
+    const title = soon.length === 1 ? '快要到点了：' + soon[0].t.title : soon.length + ' 项待办快要到点';
+    const html = '<p style="margin:0 0 8px">以下待办即将到期：</p><ul style="padding-left:18px;margin:0">'
+      + soon.map(({ t }) => '<li><b>' + htmlEsc(t.title) + '</b> — ' + htmlEsc(t.due_date) + ' ' + htmlEsc(hhmmOf(t.due_time) || '08:00') + '</li>').join('')
+      + '</ul><p style="color:#8a94a6;margin:12px 0 0;font-size:12px">来自班主任工作台</p>';
+    const r = await sendPushplus(env, title, html);
+    if (r.ok) { sentN++; for (const { t } of soon) mark.push(t.id); }
+  }
+
+  // ② 每日汇总（8:00 后第一条；没待办也没逾期就不发，免得天天骚扰）
+  const dailyAt = hhmmOf(cfg.daily_at) || '08:00';
+  if (Number(cfg.daily_summary) !== 0 && nowHM >= dailyAt && !sent.has('0|daily')) {
+    const dueToday = todos.filter((t) => t.due_date === today)
+      .sort((a, b) => String(hhmmOf(a.due_time) || '99:99').localeCompare(String(hhmmOf(b.due_time) || '99:99')));
+    const overdue = Number(cfg.overdue_daily) === 0 ? [] : todos.filter((t) => t.due_date && t.due_date < today)
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
+    if (dueToday.length || overdue.length) {
+      let extra = '';
+      try {
+        const ctx = await diningContext(env);
+        const onleave = diningStatsFor(today, ctx).onleave;
+        const dineTmw = diningStatsFor(addDaysStr(today, 1), ctx).final;
+        extra = '<p style="margin:12px 0 0;color:#5f6470">班级：今日请假 ' + onleave + ' 人 · 明日就餐 ' + dineTmw + ' 人</p>';
+      } catch (e) { /* 就餐数据取不到不影响提醒 */ }
+      const title = '今日待办 ' + dueToday.length + ' 项' + (overdue.length ? ' · 逾期 ' + overdue.length + ' 项' : '');
+      const html = (dueToday.length
+        ? '<p style="margin:0 0 6px"><b>今天要做</b></p><ul style="padding-left:18px;margin:0 0 4px">'
+        + dueToday.map((t) => '<li>' + (hhmmOf(t.due_time) ? htmlEsc(hhmmOf(t.due_time)) + ' ' : '') + htmlEsc(t.title) + '</li>').join('') + '</ul>'
+        : '')
+        + (overdue.length
+          ? '<p style="margin:12px 0 6px;color:#dc2626"><b>逾期未完成</b></p><ul style="padding-left:18px;margin:0">'
+          + overdue.map((t) => '<li>' + htmlEsc(t.due_date) + ' ' + htmlEsc(t.title) + '</li>').join('') + '</ul>'
+          : '')
+        + extra
+        + '<p style="color:#8a94a6;margin:12px 0 0;font-size:12px">来自班主任工作台</p>';
+      const r = await sendPushplus(env, title, html);
+      if (r.ok) { sentN++; mark.push(0); }
+    }
+  }
+
+  if (mark.length) {
+    const stmts = [];
+    for (const id of mark) {
+      const kind = id === 0 ? 'daily' : 'before';
+      stmts.push(env.DB.prepare('INSERT INTO todo_reminders(todo_id,kind,fire_date,sent_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING')
+        .bind(id, kind, today, now));
+    }
+    await execBatch(env, stmts);
+  }
+  return sentN;
+}
+
+// 规范化待办的时间/提醒字段
+const normTime = (v) => (hhmmOf(v) || null);
+function normBefore(v, dflt) {
+  if (v === undefined) return dflt;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 1440) return dflt;
+  return Math.round(n);
+}
+function normOn(v, dflt) {
+  if (v === undefined) return dflt;
+  return Number(v) === 0 ? 0 : 1;
+}
 
 // ---------- 宿舍核对 ----------
 // 注意语义：只更新「本次提交里出现的学生」，未提及的人不落行
@@ -584,9 +749,9 @@ async function saveSchedule(env, kind, b) {
 // ---------- 导出 ----------
 async function exportAll(env) {
   const dump = {};
-  for (const t of ['students', 'leaves', 'todos', 'todo_checks', 'dorm_checks', 'dining_optout',
+  for (const t of ['students', 'leaves', 'todos', 'todo_checks', 'todo_reminders', 'dorm_checks', 'dining_optout',
     'dining_daily', 'dining_history', 'dining_tables', 'dining_seats', 'violations', 'schedules', 'settings']) {
-    dump[t] = await all(env, `SELECT * FROM ${t}`);
+    try { dump[t] = await all(env, `SELECT * FROM ${t}`); } catch (e) { dump[t] = []; }
   }
   const seating = await first(env, 'SELECT data FROM seating WHERE id=1');
   dump.seating = seating ? JSON.parse(seating.data) : null;
@@ -661,6 +826,13 @@ async function route(request, env) {
     if (m === 'DELETE') return json({ ok: await deleteViolation(env, Number(seg[1])) });
   }
   if (seg[0] === 'schedule' && m === 'PUT') return json({ ok: await saveSchedule(env, seg[1], body) });
+  if (seg[0] === 'notify' && m === 'POST' && seg[1] === 'test') {
+    const r = await sendPushplus(env, '工作台提醒测试',
+      '<p>如果你在微信里看到这条消息，说明待办提醒已经通了。</p>'
+      + '<p style="color:#8a94a6;font-size:12px">之后「快要到点」「每日汇总」「逾期未完成」都会推到这里。</p>',
+      body.token);
+    return json(r, r.ok ? 200 : 400);
+  }
   if (seg[0] === 'settings' && m === 'PUT') {
     await setSetting(env, Object.keys(body)[0], Object.values(body)[0]);
     return json({ ok: true });
@@ -677,12 +849,33 @@ export default {
       try { return await route(request, env); }
       catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
     }
+    // 桌面卡片用短地址 /widget（实际文件是 /widget.html）
+    if (url.pathname === '/widget' || url.pathname === '/widget/') {
+      return env.ASSETS.fetch(new Request(new URL('/widget.html', url).toString(), request));
+    }
+    // manifest 必须按 application/manifest+json 返回，否则浏览器不认，装不了应用
+    if (url.pathname === '/manifest.webmanifest') {
+      const r = await env.ASSETS.fetch(new Request(new URL('/manifest.webmanifest', url).toString(), request));
+      return new Response(r.body, {
+        status: r.status,
+        headers: { 'content-type': 'application/manifest+json; charset=utf-8', 'cache-control': 'no-cache' },
+      });
+    }
     return env.ASSETS.fetch(request);
   },
-  // 定时兜底：即使当天没人打开工作台，也把该上报的就餐日期补上
-  // 触发时间见 wrangler.toml：[triggers] crons = ["0 15 * * *"] → 每天 23:00 北京时间
+  // 定时任务（见 wrangler.toml）：
+  //   */5 * * * *  → 待办提醒（每 5 分钟检查一次，发过的不重复发）
+  //   0 15 * * *   → 每天 23:00（北京时间）补就餐上报
   async scheduled(event, env, ctx) {
-    try { await ensureDiningHistory(env); }
-    catch (e) { console.error('dining auto-report failed:', e && (e.stack || e.message || e)); }
+    const cron = (event && event.cron) || '';
+    const job = (async () => {
+      try { await runTodoReminders(env); }
+      catch (e) { console.error('todo reminders failed:', e && (e.stack || e.message || e)); }
+      if (!cron || cron === '0 15 * * *') {
+        try { await ensureDiningHistory(env); }
+        catch (e) { console.error('dining auto-report failed:', e && (e.stack || e.message || e)); }
+      }
+    })();
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job); else await job;
   },
 };

@@ -43,8 +43,21 @@ CREATE TABLE IF NOT EXISTS todos (
   done           INTEGER NOT NULL DEFAULT 0,
   done_at        INTEGER,
   created_at     INTEGER NOT NULL,
-  postpone_count INTEGER NOT NULL DEFAULT 0
+  postpone_count INTEGER NOT NULL DEFAULT 0,
+  due_time       TEXT,                            -- 截止时间 HH:mm（空=只有日期，按 08:00 提醒）
+  remind_before  INTEGER NOT NULL DEFAULT 30,     -- 提前多少分钟提醒（0=到点）
+  remind_on      INTEGER NOT NULL DEFAULT 1       -- 这条是否开提醒
 );
+
+-- 待办提醒去重（每 5 分钟一轮的定时任务，靠唯一索引保证同一天同一件事只推一次）
+CREATE TABLE IF NOT EXISTS todo_reminders (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  todo_id   INTEGER NOT NULL,                     -- 0 = 每日汇总
+  kind      TEXT    NOT NULL,                     -- before=快要到点 / daily=每日汇总
+  fire_date TEXT    NOT NULL,                     -- 北京日期
+  sent_at   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminder_uniq ON todo_reminders(todo_id, kind, fire_date);
 
 -- 待办 × 花名册 逐人勾选（link_roster=1 时用）
 CREATE TABLE IF NOT EXISTS todo_checks (
