@@ -993,6 +993,10 @@ function dormCheckModal(){
 /* ============ 页面：就餐 ============ */
 function pgDining(){
   const date = tomorrow(), leaveSet = leaveIdsOn(date);
+  // 今天还在请假、但明天不在假期内的人（请假到今天结束 / 今天已销假）→ 明天回校，正常计就餐。
+  // 老师看到「今天请假 5 人、明天只减 3 人」时的对账依据，就是这个差集。
+  const backTmw = [...leaveIdsOn(today())].filter(id => !leaveSet.has(id)).map(stuName);
+  const leaveNames = [...leaveSet].map(stuName);
   const daily = S.dining_daily.find(d=>d.date===date) || {plus:0,minus:0};
   const optout = S.dining_optout.filter(o=>o.date===date).map(o=>o.student_id);
   const final = Math.max(0, S.students.length - leaveSet.size - optout.length + Number(daily.plus||0) - Number(daily.minus||0));
@@ -1012,6 +1016,8 @@ function pgDining(){
       <div>
         <div class="field" style="display:flex;justify-content:space-between"><span>班级总人数</span><b>${S.students.length}</b></div>
         <div class="field" style="display:flex;justify-content:space-between"><span>请假学生</span><b style="color:var(--red)">-${leaveSet.size}</b></div>
+        ${leaveNames.length?`<div class="hint" style="margin:-6px 0 2px">仍在假期内（明日在校扣除）：${leaveNames.map(esc).join('、')}</div>`:''}
+        ${backTmw.length?`<div class="hint" style="margin:0 0 10px">另有 ${backTmw.length} 人明天返校，正常计就餐：${backTmw.map(esc).join('、')}</div>`:''}
         <div class="field" style="display:flex;justify-content:space-between"><span>不就餐</span><b style="color:var(--red)">-${optout.length}</b></div>
         <div class="field"><label>不吃名单（自动从就餐人数抵扣）</label>
           <div style="display:flex;gap:6px;margin-bottom:6px">
