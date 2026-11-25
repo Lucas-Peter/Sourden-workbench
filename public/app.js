@@ -2,7 +2,32 @@
 'use strict';
 
 /* ---------- 常量 ---------- */
-const DORMS = ['405男','405女','406男','406女','407男','407女','409女','410女','411女','413男'];
+// 页面代码版本号：改完前端就换个后缀（a→b→c），顶栏会显示 v2026-11-25a。
+// 看不到新版本号 = 浏览器用的还是旧 app.js（缓存或没部署），跟功能本身无关。
+const APP_VER = '2026-11-25a';
+// 宿舍列表默认值（首次打开 / 设置里还没存过 dorm_list 时用）。
+// 之后以 settings.dorm_list 为准，可在宿舍页「＋ 新增宿舍 / 🗑 删除」里改。
+const DORM_DEFAULT = ['405男','405女','406男','406女','407男','407女','409女','410女','411女','413男'];
+let DORMS = DORM_DEFAULT.slice();
+// 宿舍排序：先按房间号，再男前女后，最后按名称
+function dormCmp(a, b){
+  const na = Number((String(a).match(/\d+/) || [])[0] || 9999);
+  const nb = Number((String(b).match(/\d+/) || [])[0] || 9999);
+  if (na !== nb) return na - nb;
+  const ga = a.endsWith('男') ? 0 : a.endsWith('女') ? 1 : 2;
+  const gb = b.endsWith('男') ? 0 : b.endsWith('女') ? 1 : 2;
+  if (ga !== gb) return ga - gb;
+  return String(a).localeCompare(String(b), 'zh-Hans-CN');
+}
+// 每次拿到 /state 后同步一次：设置里的列表为主；花名册里出现过但列表没登记的宿舍兜底补上，
+// 免得宿舍号被删掉后，住在那里的学生在页面上凭空消失（只能通过再次新增宿舍号救回来）。
+function syncDorms(){
+  const raw = S && S.settings ? S.settings.dorm_list : null;
+  const list = Array.isArray(raw) ? raw.map(String).filter(Boolean) : DORM_DEFAULT.slice();
+  const used = [...new Set(((S && S.students) || []).map(s => s.dorm).filter(Boolean))];
+  DORMS = [...list, ...used.filter(d => !list.includes(d))].sort(dormCmp);
+  return DORMS;
+}
 const CATS = {
   '宿舍':{ico:'🏠',cls:'info'}, '就餐':{ico:'🍚',cls:'ok'}, '请假':{ico:'📋',cls:'mid'},
   '学籍':{ico:'🎓',cls:'mid'}, '保险':{ico:'🛡',cls:'info'}, '教学':{ico:'📚',cls:'lo'}, '其他':{ico:'📌',cls:'lo'},
@@ -150,7 +175,7 @@ async function api(path, method='GET', body) {
   return r.json();
 }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
-async function refresh(){ S = await api('/state'); renderTop(); renderNav(); render(); }
+async function refresh(){ S = await api('/state'); syncDorms(); renderTop(); renderNav(); render(); }
 
 /* ---------- 请假联动（核心） ---------- */
 // 一条请假记录是否覆盖某一天（与后端 leaveCoversOn 完全同口径）
@@ -164,6 +189,25 @@ function leaveCoversOn(l, d){
 function leaveIdsOn(date){
   const set = new Set();
   for (const l of S.leaves) if (leaveCoversOn(l, date)) set.add(l.student_id);
+  return set;
+}
+// 宿舍口径（和就餐口径不同！）：
+//   销假当天学生已经回校，晚上要在宿舍，所以「返校日 <= 当天」不算请假。
+//   leaveCoversOn 里 returned_at 是「当天仍算请假」，那是给就餐用的（当天白天的饭没吃）。
+function leaveCoversNight(l, d){
+  if (l.returned_at && l.returned_at <= d) return false;
+  return leaveCoversOn(l, d);
+}
+// 某天晚上还在外请假的学生集合（宿舍核对、宿舍卡片用这个）
+function leaveNightSet(date){
+  const set = new Set();
+  for (const l of S.leaves) if (leaveCoversNight(l, date)) set.add(l.student_id);
+  return set;
+}
+// 当天销假返校的学生（用于显示「今日返校」绿标）
+function backTodaySet(date){
+  const set = new Set();
+  for (const l of S.leaves) if (l.returned_at === date) set.add(l.student_id);
   return set;
 }
 const uncheckedStu = (f) => S.students.filter(f);
@@ -211,6 +255,7 @@ function leaveDaySets(){
 function renderTop(){
   $('#tb-teacher').textContent = S.settings.teacher_name || '点击设置';
   $('#tb-count').textContent = S.students.length;
+  const ver = $('#tb-ver'); if (ver) ver.textContent = 'v' + APP_VER;
 }
 const NAV = [
   ['todos','✅','待办事项',()=>S.todos.filter(t=>!t.done).length],
@@ -782,28 +827,36 @@ async function studentDel(id){
 
 /* ============ 页面：宿舍 ============ */
 function pgDorms(){
-  const td = today(), leaveSet = leaveIdsOn(td);
-  const presentOf = s => { const c = S.dorm_checks.find(c=>c.student_id===s.id&&c.check_date===td); return c?!!c.present:!leaveSet.has(s.id); };
+  const td = today();
+  // 宿舍按「晚上在不在」算：当天销假返校的人已经回来，不再算请假
+  const leaveSet = leaveNightSet(td), backSet = backTodaySet(td);
+  const isOut = s => leaveSet.has(s.id);
+  const presentOf = s => { const c = S.dorm_checks.find(c=>c.student_id===s.id&&c.check_date===td); return c?!!c.present:!isOut(s); };
   const membersOf = d => S.students.filter(s=>s.dorm===d).sort((a,b)=>(a.bed||'99').localeCompare(b.bed||'99','zh',{numeric:true}));
   const maleDorms = DORMS.filter(d=>d.endsWith('男')), femaleDorms = DORMS.filter(d=>d.endsWith('女'));
+  const otherDorms = DORMS.filter(d=>!d.endsWith('男') && !d.endsWith('女'));
   const inDorm = S.students.filter(s=>s.dorm);
   const presentAll = inDorm.filter(s=>presentOf(s)).length;
-  const onLeaveAll = inDorm.filter(s=>leaveSet.has(s.id)).length;
+  const onLeaveAll = inDorm.filter(isOut).length;
   const dormCard = d => {
     const mem = membersOf(d);
     const leader = mem.find(s=>s.dorm_leader);
-    const onLeave = mem.filter(s=>leaveSet.has(s.id)).length;
+    const onLeave = mem.filter(isOut).length;
     const here = mem.filter(s=>presentOf(s)).length;
+    const back = mem.filter(s=>!isOut(s) && backSet.has(s.id));
     return `<div class="dorm-card">
       <div class="d-head">
         <span class="d-name">🏠 ${d}</span>
         <span class="d-stat">应住 ${mem.length} · 请假 ${onLeave} · 实到 ${here}</span>
-        <button class="btn sm" style="margin-left:auto" onclick="dormAdjustModal('${d}')">⚙ 调整</button>
+        <span class="d-acts">
+          <button class="btn sm" onclick="dormAdjustModal('${d}')">⚙ 调整</button>
+          <button class="btn sm danger" title="删除这个宿舍号（宿舍里必须没人）" onclick="dormDel('${d}')">🗑 删除</button></span>
       </div>
+      ${back.length?`<div class="d-leader" style="color:var(--green)">✅ 今日返校：${back.map(s=>esc(s.name)).join('、')}</div>`:''}
       ${leader?`<div class="d-leader">👑 宿舍长：${esc(leader.name)}</div>`:''}
       <div class="d-members">${mem.length?mem.map(s=>`<div class="d-member">
           <span class="bed">${esc(s.bed)||'—'}</span>
-          <b>${esc(s.name)}</b>${leaveSet.has(s.id)?'<span class="pill hi">请假中</span>':''}
+          <b>${esc(s.name)}</b>${isOut(s)?'<span class="pill hi">请假中</span>':(backSet.has(s.id)?'<span class="pill ok">今日返校</span>':'')}
           <span class="pill ${presentOf(s)?'ok':'hi'}">${presentOf(s)?'✔ 在校':'✗ 未到'}</span>
           <span class="phone">${esc(s.parent_phone)||'未填'}</span>
         </div>`).join(''):'<div class="empty">暂无学生</div>'}</div>
@@ -811,17 +864,61 @@ function pgDorms(){
   };
   $('#main').innerHTML = `
     <div class="page-head"><div class="page-title">🏠 宿舍分配<small>共 ${DORMS.length} 个宿舍</small></div>
-      <button class="btn primary" onclick="dormCheckModal()">📋 整班核对</button></div>
+      <div class="head-actions">
+        <button class="btn" onclick="dormAddModal()">＋ 新增宿舍</button>
+        <button class="btn primary" onclick="dormCheckModal()">📋 整班核对</button>
+      </div></div>
     <div class="statbar">
       <div class="st"><b>${inDorm.length}</b><span>应住宿舍</span></div>
       <div class="st warn"><b>${onLeaveAll}</b><span>当前请假</span></div>
       <div class="st"><b>${presentAll}</b><span>实到</span></div>
     </div>
-    <div class="dorm-sec-title">👨 男宿舍</div><div class="dorm-grid">${maleDorms.map(dormCard).join('')}</div>
-    <div class="dorm-sec-title">👩 女宿舍</div><div class="dorm-grid">${femaleDorms.map(dormCard).join('')}</div>`;
+    <div class="dorm-sec-title">👨 男宿舍</div><div class="dorm-grid">${maleDorms.map(dormCard).join('')||'<div class="empty">还没有男生宿舍，点右上角「＋ 新增宿舍」</div>'}</div>
+    <div class="dorm-sec-title">👩 女宿舍</div><div class="dorm-grid">${femaleDorms.map(dormCard).join('')||'<div class="empty">还没有女生宿舍，点右上角「＋ 新增宿舍」</div>'}</div>
+    ${otherDorms.length?`<div class="dorm-sec-title">🏠 未标男女的宿舍</div><div class="dorm-grid">${otherDorms.map(dormCard).join('')}</div>`:''}`;
+}
+/* ---------- 宿舍号的增删（存 settings.dorm_list） ---------- */
+async function dormAddModal(){
+  const m = openModal(`${modalHead('➕ 新增宿舍')}
+    <div class="m-body">
+      <div class="field"><label>宿舍名称</label>
+        <input id="dm-name" placeholder="例：414女" autocomplete="off"></div>
+      <div class="hint">格式跟现有宿舍一致：房号 + 性别，结尾必须是「男」或「女」（决定它归到男宿舍还是女宿舍）。如 414男、409女。</div>
+    </div>
+    <div class="m-foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="dm-save">新增</button></div>`);
+  const inp = m.querySelector('#dm-name');
+  inp.focus();
+  inp.onkeydown = e => { if (e.key === 'Enter') m.querySelector('#dm-save').click(); };
+  m.querySelector('#dm-save').onclick = async (e) => {
+    const name = (inp.value || '').trim();
+    if (!name) return alert('请填写宿舍名称');
+    if (!/男$|女$/.test(name)) return alert('宿舍名称必须以「男」或「女」结尾，例：414女');
+    if (DORMS.includes(name)) return alert('「' + name + '」已经在列表里了');
+    const btn = e.currentTarget; btn.disabled = true; btn.textContent = '保存中…';
+    try {
+      await api('/settings','PUT',{ dorm_list: [...DORMS, name].sort(dormCmp) });
+      closeModal(); await refresh(); toast('已新增 ' + name);
+    } catch (err) {
+      btn.disabled = false; btn.textContent = '新增';
+      alert('新增失败：' + (err && err.message ? err.message : err));
+    }
+  };
+}
+async function dormDel(d){
+  const mem = S.students.filter(s => s.dorm === d);
+  if (mem.length) {
+    return alert(`「${d}」里还有 ${mem.length} 人，不能直接删：\n${mem.map(s=>s.name).join('、')}\n\n请先点这间的「⚙ 调整」把他们移出或调到别的宿舍，人空了再删这个宿舍号。`);
+  }
+  if (!confirm(`确定删除宿舍「${d}」？\n\n只是把这个宿舍号从列表里去掉；里面没有人，不会影响任何学生。`)) return;
+  try {
+    await api('/settings','PUT',{ dorm_list: DORMS.filter(x => x !== d) });
+    await refresh(); toast('已删除 ' + d);
+  } catch (err) {
+    alert('删除失败：' + (err && err.message ? err.message : err));
+  }
 }
 function dormAdjustModal(d){
-  const td = today(), leaveSet = leaveIdsOn(td);
+  const td = today(), leaveSet = leaveNightSet(td);
   const presentOf = s => { const c = S.dorm_checks.find(c=>c.student_id===s.id&&c.check_date===td); return c?!!c.present:!leaveSet.has(s.id); };
   const byBed = (a,b) => (a.bed||'99').localeCompare(b.bed||'99','zh',{numeric:true});
   const mem = S.students.filter(s=>s.dorm===d).sort(byBed);
@@ -931,7 +1028,9 @@ function dormAdjustModal(d){
   };
 }
 function dormCheckModal(){
-  const td = today(), leaveSet = leaveIdsOn(td);
+  const td = today();
+  // 同上：宿舍核对按「今晚在不在校」算，当天销假返校的人默认在校
+  const leaveSet = leaveNightSet(td), backSet = backTodaySet(td);
   const meta = S.settings.dorm_meta||{};
   const state = {}; // sid -> present
   for (const s of S.students) {
@@ -954,12 +1053,12 @@ function dormCheckModal(){
         const onL = dm.filter(s=>leaveSet.has(s.id)).length;
         return `<div class="field"><label><b>${d}</b>（${dm.length} 人）　在校 ${dm.filter(s=>state[s.id]).length}/${dm.length} 人 · 请假 ${onL} 人</label>
           <div class="person-pills">${dm.map(s=>
-            `<span class="person-pill ${state[s.id]?'on':'off'} ${leaveSet.has(s.id)?'leave':''}" data-id="${s.id}">${esc(s.name)}${leaveSet.has(s.id)?'（请假）':''}</span>`).join('')}</div></div>`;
+            `<span class="person-pill ${state[s.id]?'on':'off'} ${leaveSet.has(s.id)?'leave':''}" data-id="${s.id}">${esc(s.name)}${leaveSet.has(s.id)?'（请假）':(backSet.has(s.id)?'（今日返校）':'')}</span>`).join('')}</div></div>`;
       }).join('');
   };
   const m = openModal(`${modalHead('🏠 宿舍人数核对')}
     <div class="m-body">
-      <div class="hint">已自动把「请假中」标为不在校，其余标为在校；可点名字手动切换，保存后就餐/统计实时联动。</div>
+      <div class="hint">已自动把「请假中」标为不在校，其余标为在校；<b>当天已销假返校的按在校算</b>。可点名字手动切换，保存后就餐/统计实时联动。</div>
       <div class="note-strip" id="dc-sum" style="background:#f8fafc;border-color:var(--line);color:var(--ink)">${summary()}</div>
       ${dormBlock('👦 男生宿舍', DORMS.filter(d=>d.endsWith('男')))}
       ${dormBlock('👧 女生宿舍', DORMS.filter(d=>d.endsWith('女')))}
@@ -1519,6 +1618,7 @@ if (btnRemind) btnRemind.onclick = remindSettingsModal;
 (async function init(){
   try {
     S = await api('/state');
+    syncDorms();
     renderTop(); renderNav(); render();
     localRemindTick();
     setInterval(localRemindTick, 60000);
