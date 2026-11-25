@@ -24,6 +24,7 @@ body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","M
 .topbar .meta b{font-weight:700}
 .topbar .spacer{flex:1}
 .topbar .storage{background:rgba(255,255,255,.18);border-radius:999px;padding:2px 10px;font-size:12px}
+.topbar .ver{background:rgba(0,0,0,.16);border-radius:999px;padding:2px 9px;font-size:11.5px;opacity:.85;letter-spacing:.02em}
 
 /* 布局 */
 .layout{display:flex;min-height:calc(100vh - 46px)}
@@ -252,6 +253,7 @@ table.tbl tr.dim:hover td{background:#fff}
     <span>班主任 <b id="tb-teacher">—</b></span>
     <span>班级 <b id="tb-count">0</b> 人</span>
     <span class="storage" title="预览模式下数据存在浏览器本地，不会上传">🖥 本地预览</span>
+    <span class="ver" id="tb-ver" title="页面代码版本：换版本号说明新代码已生效">v—</span>
   </div>
   <div class="spacer"></div>
   <button class="btn sm" id="btn-reset" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.35);color:#fff;margin-right:8px">↺ 重置预览</button>
@@ -818,6 +820,9 @@ table.tbl tr.dim:hover td{background:#fff}
 'use strict';
 
 /* ---------- 常量 ---------- */
+// 页面代码版本号：改完前端就换个后缀（a→b→c），顶栏会显示 v2026-11-25a。
+// 看不到新版本号 = 浏览器用的还是旧 app.js（缓存或没部署），跟功能本身无关。
+const APP_VER = '2026-11-25a';
 // 宿舍列表默认值（首次打开 / 设置里还没存过 dorm_list 时用）。
 // 之后以 settings.dorm_list 为准，可在宿舍页「＋ 新增宿舍 / 🗑 删除」里改。
 const DORM_DEFAULT = ['405男','405女','406男','406女','407男','407女','409女','410女','411女','413男'];
@@ -1068,6 +1073,7 @@ function leaveDaySets(){
 function renderTop(){
   $('#tb-teacher').textContent = S.settings.teacher_name || '点击设置';
   $('#tb-count').textContent = S.students.length;
+  const ver = $('#tb-ver'); if (ver) ver.textContent = 'v' + APP_VER;
 }
 const NAV = [
   ['todos','✅','待办事项',()=>S.todos.filter(t=>!t.done).length],
