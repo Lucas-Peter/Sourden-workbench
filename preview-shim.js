@@ -364,6 +364,8 @@
         let n = 0;
         for (const sid of ids) { store.leaves.push({ id: nid(store.leaves), student_id: sid, start_date: body.start_date,
           end_date: body.end_date || null, reason: String(body.reason || ''), status: '请假中', returned_at: null, created_at: now }); n++; }
+        // 与 worker 一致：今天起就请假 → 今晚不在宿舍，清掉今天已存的核对行
+        if (n && String(body.start_date || '') <= T) store.dorm_checks = store.dorm_checks.filter(c => !(c.check_date === T && ids.includes(c.student_id)));
         save(); return { status: 201, data: { ok: true, added: n } };
       }
       const id = Number(seg[1]);
@@ -374,7 +376,13 @@
         return { status: 200, data: { ok: true } };
       }
       if (method === 'POST' && seg[2] === 'return') {
-        const cur = store.leaves.find(x => x.id === id); if (cur) { cur.status = '已返校'; cur.returned_at = T; save(); }
+        const cur = store.leaves.find(x => x.id === id);
+        if (cur) {
+          cur.status = '已返校'; cur.returned_at = T;
+          // 当天返校 → 今晚在宿舍：清掉今天的核对行，让默认值回到「在校」
+          store.dorm_checks = store.dorm_checks.filter(c => !(c.check_date === T && c.student_id === cur.student_id));
+          save();
+        }
         return { status: 200, data: { ok: true } };
       }
       if (method === 'DELETE') { store.leaves = store.leaves.filter(x => x.id !== id); save(); return { status: 200, data: { ok: true } }; }

@@ -232,6 +232,13 @@ async function addLeaves(env, b) {
       sid, b.start_date, b.end_date || null, String(b.reason || ''), '请假中', now);
     n++;
   }
+  // 今天（或更早）就开始请假 → 今晚不在宿舍。清掉今天已存的核对行，让宿舍核对重算成「未到」。
+  // 只动今天这一天的行，历史核对记录不受影响。
+  const today = bjToday();
+  if (n && String(b.start_date || '') <= today) {
+    await run(env, `DELETE FROM dorm_checks WHERE check_date=? AND student_id IN (${ids.map(() => '?').join(',')})`,
+      today, ...ids);
+  }
   return n;
 }
 async function patchLeave(env, id, b) {
@@ -244,7 +251,13 @@ async function patchLeave(env, id, b) {
 }
 async function returnLeave(env, id) {
   const today = bjToday();   // 按北京时间取返校日（UTC 会使 0-8 点登记成前一天）
+  const cur = await first(env, 'SELECT student_id FROM leaves WHERE id=?', id);
   const r = await run(env, "UPDATE leaves SET status='已返校', returned_at=? WHERE id=?", today, id);
+  // 当天返校 → 今晚要在宿舍。把今天已经存下的核对行清掉，让宿舍页 / 整班核对回到
+  // 「按请假重算」的默认值（在校）。否则上午存过「未到」，晚上人回来了数字也不动。
+  if (r.meta.changes > 0 && cur) {
+    await run(env, 'DELETE FROM dorm_checks WHERE check_date=? AND student_id=?', today, cur.student_id);
+  }
   return r.meta.changes > 0;
 }
 async function deleteLeave(env, id) {
